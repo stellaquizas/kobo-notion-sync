@@ -112,16 +112,24 @@ level = "INFO"
 
 ## Notion Database Schema
 
-Your Notion database should have these properties:
+Your Notion database will be initialized with these properties:
 
 - **Name** (Title) - Book title
-- **Category** (Select) - Book category
-- **Date Done #1** (Date) - Completion date
-- **Image** (Files & Media) - Book cover
-- **Progress Code** (Select) - Must have: "New", "Reading", "Completed"
-- **Type** (Select) - Must have: "Kobo"
+- **Author** (Text) - Book author
+- **Type** (Select) - Entry type ("Kobo" for synced books)
+- **ISBN** (Text) - International Standard Book Number
+- **Publisher** (Text) - Book publisher
+- **Description** (Text) - Book summary
+- **Status** (Select) - Reading status: "New", "Reading", "Finished"
+- **Progress** (Number/Percent) - Reading progress (0-100%)
+- **Time Spent** (Number) - Reading time in minutes
+- **Kobo Content ID** (Text) - Internal tracking field
+- **Last Sync Time** (Date) - Last sync timestamp
+- **Highlights Count** (Number) - Number of synced highlights
 
-The setup wizard can help create these properties automatically.
+**Cover Images:** Book covers are set as page covers (not a database property). To display covers in Gallery view, configure your view settings to use "Page cover" as the card preview source.
+
+The setup wizard automatically creates these properties for empty databases.
 
 ## Troubleshooting
 

@@ -4,6 +4,7 @@ import click
 
 from kobo_notion_sync import __version__
 from kobo_notion_sync.cli.setup import setup as setup_command
+from kobo_notion_sync.cli.sync import sync as sync_command
 
 
 @click.group()
@@ -16,15 +17,10 @@ def cli() -> None:
 # Register setup command
 cli.add_command(setup_command, name="setup")
 
-
-@cli.command()
-@click.option("--full", is_flag=True, help="Force full sync (bypass cache)")
-@click.option("--dry-run", is_flag=True, help="Preview changes without syncing")
-@click.option("--no-notification", is_flag=True, help="Disable desktop notifications")
-def sync(full: bool, dry_run: bool, no_notification: bool) -> None:
-    """Sync highlights from Kobo to Notion."""
-    click.echo("Sync command coming soon...")
+# Register sync command
+cli.add_command(sync_command, name="sync")
 
 
 if __name__ == "__main__":
     cli()
+

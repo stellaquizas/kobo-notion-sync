@@ -34,7 +34,6 @@ venv.bak/
 # PyCharm
 .idea/
 
-# Development Process (excluded from git, but accessible to AI agents)
 .claude/
 .github/
 .specify/
@@ -42,6 +41,7 @@ venv.bak/
 .vscode/
 tests/
 specs/
+*.md
 
 # Testing
 .pytest_cache/
@@ -65,8 +65,7 @@ dmypy.json
 .env.*
 !.env.example
 
-# Markdown files (except README)
-*.md
+
 !README.md
 
 # macOS

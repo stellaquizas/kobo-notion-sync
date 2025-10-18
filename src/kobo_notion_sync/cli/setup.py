@@ -252,14 +252,27 @@ def setup(
                 page_count = selected_db.get("page_count")
                 
                 if page_count == 0:
-                    # Empty database - skip validation, accept it directly
-                    click.echo("Validating database schema...", nl=False)
-                    click.echo(" ✓")
-                    click.secho(f"✓ Database is empty and ready for use", fg="green")
+                    # Empty database - initialize with required properties
+                    click.echo("Database is empty. Initializing required properties...", nl=False)
                     
-                    selected_database_id = selected_db["id"]
-                    selected_database_title = selected_db["title"]
-                    break
+                    try:
+                        client.initialize_empty_database(selected_db["id"])
+                        click.echo(" ✓")
+                        click.secho(
+                            f"✓ Database initialized with required properties (Author, Type, ISBN, etc.)",
+                            fg="green"
+                        )
+                        
+                        selected_database_id = selected_db["id"]
+                        selected_database_title = selected_db["title"]
+                        break
+                    
+                    except NotionValidationError as e:
+                        click.echo(" ✗")
+                        click.secho(f"✗ Failed to initialize database: {e}", fg="red")
+                        click.echo("Please try another database or check permissions.\n")
+                        continue
+                
                 else:
                     # Database has data - validate schema
                     click.echo("Validating database schema...", nl=False)

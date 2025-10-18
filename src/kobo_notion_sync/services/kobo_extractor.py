@@ -2,10 +2,15 @@
 
 import os
 import sqlite3
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import TYPE_CHECKING, Optional, Dict, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    from kobo_notion_sync.models.book import Book
+    from kobo_notion_sync.models.highlight import Highlight
 
 logger = structlog.get_logger(__name__)
 
@@ -358,3 +363,275 @@ class KoboExtractor:
         # This gracefully handles any new or unknown Kobo devices
         logger.debug("unknown_device_code_using_generic", device_code=device_code)
         return "Kobo eReader"
+    
+    def extract_books(
+        self,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> list["Book"]:
+        """Extract all books from Kobo database.
+        
+        Queries content table WHERE ContentType=6 (INTEGER, EPUB ebooks only).
+        Extracts: title, author, isbn, publisher, description (if configured),
+        reading progress, status, TimeSpentReading (if configured).
+        
+        Args:
+            config: Optional config dict with extract_description and extract_time_spent flags
+        
+        Returns:
+            List of Book objects
+        
+        Raises:
+            KoboDeviceError: If device not detected or database access fails
+        """
+        from kobo_notion_sync.models.book import Book
+        
+        if not self.mount_path:
+            self.detect_device()
+        
+        if not self.mount_path:
+            raise KoboDeviceError("Device not detected. Call detect_device() first.")
+        
+        db_path = self.mount_path / self.KOBO_DB_PATH
+        
+        # Set extraction flags from config
+        extract_description = config.get("extract_description", False) if config else False
+        extract_time_spent = config.get("extract_time_spent", False) if config else False
+        
+        logger.info(
+            "extracting_books",
+            extract_description=extract_description,
+            extract_time_spent=extract_time_spent,
+        )
+        
+        books = []
+        
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            # Query books from content table (ContentType=6 = EPUB ebooks only)
+            # Exclude audiobooks (ContentType=9) and articles (ContentType=899)
+            # Filter for owned books: IsDownloaded = true AND Accessibility = 1
+            # (Accessibility: -1=not accessible, 1=owned, 6=preview/sample)
+            query = """
+                SELECT 
+                    ContentID as kobo_content_id,
+                    Title as title,
+                    Attribution as author,
+                    ISBN as isbn,
+                    Publisher as publisher,
+                    ___PercentRead as percent_read,
+                    ReadStatus as read_status,
+                    DateLastRead as date_last_read,
+                    ContentType as content_type,
+                    Description as description,
+                    TimeSpentReading as time_spent_reading
+                FROM content
+                WHERE ContentType = 6
+                    AND IsDownloaded = 'true'
+                    AND Accessibility = 1
+                ORDER BY DateLastRead DESC NULLS LAST
+            """
+            
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            
+            logger.info("books_found", count=len(rows))
+            
+            for row in rows:
+                try:
+                    # Extract kobo_content_id (trim to filename only per FR-016)
+                    kobo_id = row["kobo_content_id"]
+                    if kobo_id and kobo_id.startswith("file:///"):
+                        kobo_id = os.path.basename(kobo_id)
+                    
+                    # Parse time_spent_reading (convert from seconds to minutes if present)
+                    time_spent_minutes = None
+                    if extract_time_spent and row["time_spent_reading"]:
+                        time_spent_minutes = int(row["time_spent_reading"] / 60)
+                    
+                    # Only extract description if configured
+                    description = None
+                    if extract_description and row["description"]:
+                        description = row["description"]
+                    
+                    # Parse date_last_read if present
+                    date_last_read = None
+                    if row["date_last_read"]:
+                        try:
+                            # Kobo stores as ISO format datetime string
+                            date_last_read = row["date_last_read"]
+                        except Exception as e:
+                            logger.warning("date_parsing_failed", error=str(e))
+                    
+                    # Create Book object
+                    book = Book(
+                        kobo_content_id=kobo_id,
+                        title=row["title"] or "Unknown Title",
+                        author=row["author"] or "Unknown Author",
+                        isbn=row["isbn"],
+                        publisher=row["publisher"],
+                        description=description,
+                        time_spent_reading=time_spent_minutes,
+                        read_status=row["read_status"] or 0,
+                        percent_read=row["percent_read"] or 0.0,
+                        date_last_read=date_last_read,
+                        content_type=row["content_type"],
+                    )
+                    
+                    books.append(book)
+                    logger.debug(
+                        "book_extracted",
+                        title=book.title,
+                        kobo_id=book.kobo_content_id,
+                        progress_code=book.progress_code,
+                    )
+                
+                except Exception as e:
+                    logger.error(
+                        "book_extraction_failed",
+                        row_title=row.get("title", "Unknown"),
+                        error=str(e),
+                    )
+                    # Continue with next book
+                    continue
+            
+            conn.close()
+            
+            logger.info("books_extraction_complete", total_books=len(books))
+            return books
+        
+        except sqlite3.Error as e:
+            logger.error("database_query_failed", error=str(e))
+            raise KoboDeviceError(
+                f"Failed to query Kobo database: {e}",
+                details={"db_path": str(db_path)},
+            )
+        
+        except Exception as e:
+            logger.exception("books_extraction_error", error=str(e))
+            raise KoboDeviceError(
+                f"Unexpected error during book extraction: {e}",
+                details={"exception_type": type(e).__name__},
+            )
+    
+    def extract_highlights(self, book_id: str) -> list["Highlight"]:
+        """Extract highlights for a specific book from Kobo database.
+        
+        Queries Bookmark table WHERE Type='highlight' AND Hidden=0.
+        Joins with content table to verify book exists and ContentType=6.
+        
+        Returns highlights ordered chronologically by DateCreated (per FR-018).
+        
+        Args:
+            book_id: Kobo content ID to extract highlights for
+        
+        Returns:
+            List of Highlight objects, ordered by DateCreated (oldest first)
+        
+        Raises:
+            KoboDeviceError: If device not detected or database access fails
+        """
+        from kobo_notion_sync.models.highlight import Highlight
+        from datetime import datetime
+        
+        if not self.mount_path:
+            self.detect_device()
+        
+        if not self.mount_path:
+            raise KoboDeviceError("Device not detected. Call detect_device() first.")
+        
+        db_path = self.mount_path / self.KOBO_DB_PATH
+        
+        logger.info("extracting_highlights", book_id=book_id)
+        
+        highlights = []
+        
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            # Query highlights for book
+            # Type='highlight' AND Hidden=0 per FR-018, FR-023
+            # NOTE: Bookmark.ContentID contains the full path (e.g., "uuid!item!xhtml/file.xhtml")
+            # but Bookmark.VolumeID contains just the book UUID, which matches content.ContentID
+            # NOTE: Hidden field is TEXT type with value 'false' (not boolean/integer)
+            query = """
+                SELECT 
+                    b.Text as text,
+                    b.ChapterProgress as chapter_progress,
+                    b.DateCreated as date_created,
+                    b.Annotation as annotation
+                FROM Bookmark b
+                INNER JOIN content c ON b.VolumeID = c.ContentID
+                WHERE b.Type = 'highlight'
+                    AND b.Hidden = 'false'
+                    AND c.ContentType = 6
+                    AND c.ContentID = ?
+                ORDER BY b.DateCreated ASC
+            """
+            
+            cursor.execute(query, (book_id,))
+            rows = cursor.fetchall()
+            
+            logger.info("highlights_found", book_id=book_id, count=len(rows))
+            
+            for row in rows:
+                try:
+                    # Parse date_created
+                    date_created = datetime.fromisoformat(
+                        row["date_created"].replace("Z", "+00:00")
+                    ) if row["date_created"] else datetime.now()
+                    
+                    # Create Highlight object
+                    highlight = Highlight(
+                        book_id=book_id,
+                        text=row["text"] or "",
+                        chapter_progress=row["chapter_progress"],
+                        date_created=date_created,
+                        annotation=row["annotation"],
+                    )
+                    
+                    highlights.append(highlight)
+                    logger.debug(
+                        "highlight_extracted",
+                        book_id=book_id,
+                        text_preview=highlight.text[:50],
+                        highlight_id=highlight.highlight_id[:16],
+                    )
+                
+                except Exception as e:
+                    logger.error(
+                        "highlight_extraction_failed",
+                        book_id=book_id,
+                        text_preview=row.get("text", "")[:50],
+                        error=str(e),
+                    )
+                    # Continue with next highlight
+                    continue
+            
+            conn.close()
+            
+            logger.info(
+                "highlights_extraction_complete",
+                book_id=book_id,
+                total_highlights=len(highlights),
+            )
+            return highlights
+        
+        except sqlite3.Error as e:
+            logger.error("database_query_failed", error=str(e))
+            raise KoboDeviceError(
+                f"Failed to query Kobo database: {e}",
+                details={"db_path": str(db_path), "book_id": book_id},
+            )
+        
+        except Exception as e:
+            logger.exception("highlights_extraction_error", error=str(e))
+            raise KoboDeviceError(
+                f"Unexpected error during highlight extraction: {e}",
+                details={"exception_type": type(e).__name__, "book_id": book_id},
+            )
+

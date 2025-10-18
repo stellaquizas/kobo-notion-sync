@@ -37,6 +37,8 @@ class SyncSession(BaseModel):
     books_updated: int = Field(default=0, description="Existing books updated")
     highlights_synced: int = Field(default=0, description="New highlights added")
     highlights_skipped: int = Field(default=0, description="Duplicates skipped (from cache)")
+    cache_hits: int = Field(default=0, description="Highlights found in cache (deduplication)")
+    cache_misses: int = Field(default=0, description="Highlights not in cache (new)")
     errors: List[str] = Field(default_factory=list, description="Error messages if any")
 
     @property
@@ -66,6 +68,19 @@ class SyncSession(BaseModel):
             return 0.0
         return (self.end_time - self.start_time).total_seconds()
 
+    @property
+    def deduplication_rate(self) -> float:
+        """
+        Calculate deduplication rate as percentage.
+
+        Returns percentage of highlights that were cached (duplicates).
+        Returns 0.0 if no highlights were processed.
+        """
+        total = self.cache_hits + self.cache_misses
+        if total == 0:
+            return 0.0
+        return (self.cache_hits / total) * 100.0
+
     def summary_message(self) -> str:
         """
         Generate human-readable summary message.
@@ -73,14 +88,20 @@ class SyncSession(BaseModel):
         Used for notifications and CLI output.
         """
         if self.status == SyncStatus.SUCCESS:
+            dedup_msg = ""
+            if self.cache_hits > 0:
+                dedup_msg = f", {self.cache_hits} duplicates skipped"
             return (
-                f"Synced {self.highlights_synced} highlights from "
-                f"{self.books_processed} books in {self.duration_seconds:.1f}s"
+                f"Synced {self.cache_misses} new highlights (from {self.books_processed} books) "
+                f"in {self.duration_seconds:.1f}s{dedup_msg}"
             )
         elif self.status == SyncStatus.PARTIAL:
+            dedup_msg = ""
+            if self.cache_hits > 0:
+                dedup_msg = f", {self.cache_hits} duplicates skipped"
             return (
                 f"Partial sync: {self.highlights_synced} highlights synced, "
-                f"{len(self.errors)} errors occurred"
+                f"{len(self.errors)} errors occurred{dedup_msg}"
             )
         else:
             error_msg = self.errors[0] if self.errors else "Unknown error"
