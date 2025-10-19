@@ -1,7 +1,8 @@
 """Sync orchestrator coordinating all sync operations."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
+import time
 
 import structlog
 
@@ -9,12 +10,25 @@ from kobo_notion_sync.lib.config_loader import ConfigLoader
 from kobo_notion_sync.models.book import Book
 from kobo_notion_sync.models.config import Configuration
 from kobo_notion_sync.models.sync_session import SyncSession, SyncMode
-from kobo_notion_sync.services.cache_manager import CacheManager, CacheCorruptionError
 from kobo_notion_sync.services.kobo_extractor import KoboExtractor, KoboDeviceError
 from kobo_notion_sync.services.notion_client import NotionClient, NotionValidationError
 from kobo_notion_sync.services.cover_image import CoverImageService
 
 logger = structlog.get_logger(__name__)
+
+
+def _short_uuid(uuid_str: Optional[str]) -> str:
+    """Return first 8 characters of UUID for readable logging.
+    
+    Args:
+        uuid_str: Full UUID string or None
+    
+    Returns:
+        First 8 characters of UUID, or 'unknown' if None
+    """
+    if not uuid_str:
+        return "unknown"
+    return str(uuid_str)[:8]
 
 
 class SyncError(Exception):
@@ -25,17 +39,16 @@ class SyncError(Exception):
 
 class SyncManager:
     """
-    Orchestrates sync operations coordinating kobo_extractor, cache_manager, and notion_client.
+    Orchestrates sync operations coordinating kobo_extractor and notion_client.
 
     Implements:
     - Kobo device connection verification (T045, FR-021)
     - Book metadata extraction from Kobo (T046-T047B, FR-016-FR-022)
     - Highlight extraction from Kobo (T049-T050, FR-018, FR-023)
-    - Cache-based deduplication (T052-T053, FR-031-FR-034A)
+    - Last read date based updates (smart sync based on reading activity)
     - Notion book creation/update (T055-T056, FR-027-FR-028)
-    - Highlight page generation (T057-T057F, FR-028B)
+    - Highlight page generation with reading period info (T057-T057F, FR-028B)
     - Kobo-as-source-of-truth logic (T060, FR-028A)
-    - Cache atomic updates (T064, FR-033)
     - Status transitions (T061, FR-024)
     - Structured logging (T066, FR-050-FR-051)
     """
@@ -56,7 +69,6 @@ class SyncManager:
         self.kobo_extractor = kobo_extractor
         self.notion_client = notion_client
         self.config = config
-        self.cache_manager = CacheManager()
         self.cover_image_service = CoverImageService()
 
         logger.info("sync_manager_initialized")
@@ -72,13 +84,12 @@ class SyncManager:
         1. Device verification (FR-021)
         2. Book extraction (FR-016, FR-017, FR-022)
         3. Highlight extraction (FR-018, FR-023)
-        4. Cache deduplication (FR-029-FR-034)
-        5. Notion book creation/update (FR-027-FR-028)
-        6. Highlight page generation (FR-028B)
-        7. Atomic cache update (FR-033)
+        4. Notion book creation/update (FR-027-FR-028)
+        5. Highlight page generation/update (FR-028B)
+        6. Sync metadata update
 
         Args:
-            full_mode: If True, bypass cache and re-sync all highlights (FR-024, T068)
+            full_mode: If True, force re-sync all books (ignored, not used)
             dry_run: If True, preview changes without syncing (T043)
 
         Returns:
@@ -89,7 +100,7 @@ class SyncManager:
         """
         session = SyncSession(
             sync_mode=SyncMode.FULL,
-            start_time=datetime.now(),
+            start_time=datetime.now(timezone.utc).astimezone(),
         )
 
         logger.info("sync_full_started", full_mode=full_mode, dry_run=dry_run)
@@ -111,21 +122,25 @@ class SyncManager:
                 session.complete()
                 return session
 
-            # Step 2: Validate cache (FR-034A, T053)
-            logger.info("sync_step_cache_validation")
-            try:
-                cache_status = self.cache_manager.validate_cache()
-                if not cache_status["valid"]:
-                    logger.warning(
-                        "cache_invalid_rebuilding",
-                        error=cache_status.get("error"),
+            # Step 1.5: Delete all Kobo books if full_mode (before starting sync)
+            if full_mode:
+                logger.info("sync_full_mode_deleting_existing_kobo_books")
+                try:
+                    deleted_count = self.notion_client.delete_all_kobo_books(
+                        self.config.notion.database_id
                     )
-                    self.cache_manager.rebuild_cache()
-            except CacheCorruptionError as e:
-                logger.warning("cache_corruption_detected", error=str(e))
-                self.cache_manager.rebuild_cache()
+                    logger.info(
+                        "kobo_books_deleted_for_full_sync",
+                        deleted_count=deleted_count,
+                    )
+                    session.add_error(f"[Full sync] Deleted {deleted_count} existing Kobo books")
+                except NotionValidationError as e:
+                    logger.error("delete_kobo_books_failed", error=str(e))
+                    session.add_error(f"Failed to delete existing Kobo books: {e}")
+                    session.complete()
+                    return session
 
-            # Step 3: Extract books from Kobo (T046-T047B, FR-016-FR-022)
+            # Step 2: Extract books from Kobo (T046-T047B, FR-016-FR-022)
             logger.info("sync_step_extracting_books")
             try:
                 config_dict = {
@@ -141,11 +156,125 @@ class SyncManager:
                 session.complete()
                 return session
 
-            # Step 4: Process each book (extract highlights, deduplicate, sync to Notion)
-            logger.info("sync_step_processing_books")
-            highlights_to_cache: List[Dict[str, str]] = []
+            # Step 2.5: Get fast batch mapping of existing Notion books
+            # (before processing any books to compare efficiently)
+            logger.info("sync_step_batch_fetch_notion_books")
+            try:
+                notion_books_mapping = self.notion_client.get_kobo_books_mapping(
+                    self.config.notion.database_id
+                )
+                logger.info(
+                    "notion_books_mapping_fetched",
+                    book_count=len(notion_books_mapping),
+                )
+            except Exception as e:
+                logger.warning(
+                    "notion_books_mapping_fetch_failed_continuing",
+                    error=str(e),
+                )
+                notion_books_mapping = {}
+
+            # Step 2.7: Identify books with changed last_read_date in Notion
+            # (smart sync: ONLY source of truth is last_read_date comparison)
+            logger.info("sync_step_identify_changed_books")
+            books_to_delete_ids = []
+            books_to_process = set()  # Track which books need processing
+            books_created_list = []  # Track new books being created
+            books_updated_list = []  # Track existing books being updated
+            
+            for book in books:
+                book_id_short = _short_uuid(book.kobo_content_id)
+                
+                if book.kobo_content_id not in notion_books_mapping:
+                    # Book not in Notion yet - will create
+                    books_to_process.add(book.kobo_content_id)
+                    books_created_list.append(book.title)
+                    logger.info(
+                        "book_update_decision",
+                        decision="WILL_UPDATE",
+                        reason="new_book_not_in_notion",
+                        kobo_id=book_id_short,
+                        title=book.title,
+                    )
+                    continue
+                
+                notion_book_data = notion_books_mapping[book.kobo_content_id]
+                notion_last_read_str = notion_book_data.get("last_read_date")
+                kobo_last_read = book.date_last_read.date() if book.date_last_read else None
+                
+                # Parse notion date string (format: "2025-10-19")
+                notion_last_read = None
+                if notion_last_read_str:
+                    try:
+                        notion_last_read = datetime.strptime(notion_last_read_str, "%Y-%m-%d").date()
+                    except:
+                        pass
+                
+                # SINGLE SOURCE OF TRUTH: last_read_date comparison
+                # If dates differ -> mark for deletion and re-insertion
+                # If dates same -> skip book entirely (no extraction, no cover image, nothing)
+                if kobo_last_read != notion_last_read:
+                    page_id = notion_book_data.get("page_id")
+                    books_to_delete_ids.append(page_id)
+                    books_to_process.add(book.kobo_content_id)
+                    books_updated_list.append(book.title)
+                    logger.info(
+                        "book_update_decision",
+                        decision="WILL_UPDATE",
+                        reason="last_read_date_changed",
+                        kobo_id=book_id_short,
+                        title=book.title,
+                        notion_last_read=str(notion_last_read),
+                        kobo_last_read=str(kobo_last_read),
+                    )
+                else:
+                    # Last read date unchanged - skip this book entirely
+                    logger.info(
+                        "book_update_decision",
+                        decision="WILL_SKIP",
+                        reason="last_read_date_unchanged",
+                        kobo_id=book_id_short,
+                        title=book.title,
+                        last_read_date=str(kobo_last_read),
+                    )
+
+            # Step 2.9: Delete outdated books (batch operation)
+            if books_to_delete_ids:
+                logger.info("sync_step_delete_outdated_books", count=len(books_to_delete_ids))
+                try:
+                    deleted_count = self.notion_client.delete_pages_batch(books_to_delete_ids)
+                    logger.info("outdated_books_deleted", count=deleted_count)
+                except Exception as e:
+                    logger.warning(
+                        "delete_outdated_books_failed_continuing",
+                        error=str(e),
+                    )
+
+            # Update session with tracking info
+            session.books_created = len(books_created_list)
+            session.books_updated = len(books_updated_list)
+            session.books_processed = len(books_to_process)  # Only books actually processed
+            session.books_skipped = len(books) - len(books_to_process)  # Books skipped due to smart sync
+            session.updated_book_names = books_created_list + books_updated_list  # All books being created/updated
+            
+            logger.info(
+                "smart_sync_summary",
+                total_books=len(books),
+                books_to_process=len(books_to_process),
+                books_skipped=session.books_skipped,
+                books_created=session.books_created,
+                books_updated=session.books_updated,
+            )
+
+            # Step 3: Process each book (extract highlights, sync to Notion)
+            logger.info("sync_step_processing_books", books_to_process_count=len(books_to_process))
 
             for book in books:
+                # Skip books that don't need processing (smart sync)
+                if book.kobo_content_id not in books_to_process:
+                    logger.debug("book_skipped_no_changes", kobo_id=_short_uuid(book.kobo_content_id), title=book.title)
+                    continue
+                
                 # Check device connection before processing each book (T063, FR-044)
                 if not self._check_device_connected():
                     logger.error("sync_device_disconnected_during_processing")
@@ -156,8 +285,8 @@ class SyncManager:
                 try:
                     logger.info(
                         "sync_processing_book",
+                        kobo_id=_short_uuid(book.kobo_content_id),
                         title=book.title,
-                        kobo_id=book.kobo_content_id,
                         progress=book.progress_code,
                     )
 
@@ -168,132 +297,61 @@ class SyncManager:
                         )
                         logger.info(
                             "highlights_extracted",
-                            book_id=book.kobo_content_id,
+                            kobo_id=_short_uuid(book.kobo_content_id),
                             count=len(highlights),
                         )
                     except KoboDeviceError as e:
                         logger.warning(
                             "highlights_extraction_failed",
-                            book_id=book.kobo_content_id,
+                            kobo_id=_short_uuid(book.kobo_content_id),
                             error=str(e),
                         )
                         highlights = []
 
-                    # Filter out cached highlights (T052, FR-031, FR-032)
-                    new_highlights = []
-                    if not full_mode:
-                        for hl in highlights:
-                            if not self.cache_manager.has_highlight(hl.highlight_id):
-                                new_highlights.append(hl)
-                                session.cache_misses += 1
-                            else:
-                                session.highlights_skipped += 1
-                                session.cache_hits += 1
-                    else:
-                        new_highlights = highlights
-                        session.cache_misses += len(highlights)
-                        logger.info("sync_full_mode_bypassing_cache")
+                    # Store for later sync
+                    session.highlights_synced += len(highlights)
 
                     logger.info(
-                        "highlights_after_deduplication",
-                        book_id=book.kobo_content_id,
-                        new_count=len(new_highlights),
-                        skipped_count=session.highlights_skipped,
+                        "highlights_to_sync",
+                        kobo_id=_short_uuid(book.kobo_content_id),
+                        count=len(highlights),
                     )
-
-                    # Skip Notion API calls for books with no new highlights (T073, FR-032)
-                    if not new_highlights:
-                        logger.debug(
-                            "skipping_notion_api_no_new_highlights",
-                            book_id=book.kobo_content_id,
-                        )
-                        continue
-
-                    # Sync new highlights to Notion
-                    session.highlights_synced += len(new_highlights)
-
-                    # Track for atomic cache update at end (T064, FR-033)
-                    for hl in new_highlights:
-                        highlights_to_cache.append(
-                            {
-                                "highlight_hash": hl.highlight_id,
-                                "book_id": book.kobo_content_id,
-                                "notion_page_id": book.notion_page_id
-                                or "",  # Set after Notion sync
-                            }
-                        )
 
                 except Exception as e:
                     logger.error(
                         "book_processing_failed",
+                        kobo_id=_short_uuid(book.kobo_content_id),
                         title=book.title,
                         error=str(e),
                     )
                     session.add_error(f"Failed to process book '{book.title}': {e}")
 
-            # Step 5: Show results in dry-run mode
-            if dry_run:
-                logger.info(
-                    "sync_dry_run_complete",
-                    books_processed=session.books_processed,
-                    highlights_synced=session.highlights_synced,
-                    highlights_skipped=session.highlights_skipped,
-                )
-            else:
-                # Step 6: Sync to Notion (T055-T057F, T096, FR-027-FR-028B)
-                logger.info("sync_step_syncing_to_notion")
+            # Step 4: Sync all books to Notion (batch/parallel friendly)
+            if not dry_run:
+                logger.info("sync_step_syncing_to_notion", book_count=len(books_to_process))
                 
                 for book in books:
+                    # Skip books that don't need processing (smart sync)
+                    if book.kobo_content_id not in books_to_process:
+                        continue
+                    
                     try:
-                        # Get highlights for this book (already extracted in Step 4)
+                        # Get highlights for this book
                         highlights = self.kobo_extractor.extract_highlights(
                             book.kobo_content_id
                         )
                         
-                        # Filter for new highlights if not in full mode
-                        if not full_mode:
-                            new_highlights = [
-                                h for h in highlights
-                                if not self.cache_manager.has_highlight(h.highlight_id)
-                            ]
-                        else:
-                            new_highlights = highlights
-                        
-                        # Skip if no new highlights to sync
-                        if not new_highlights:
-                            continue
-                        
                         # Sync book to Notion with cover image integration
-                        page_id = self._sync_book_to_notion(book, new_highlights)
-                        
-                        if page_id:
-                            # Track highlights for cache update
-                            for h in new_highlights:
-                                highlights_to_cache.append({
-                                    "highlight_hash": h.highlight_id,
-                                    "book_id": book.kobo_content_id,
-                                    "notion_page_id": page_id,
-                                })
+                        page_id = self._sync_book_to_notion(book, highlights)
                     
                     except Exception as e:
                         logger.error(
                             "notion_sync_failed",
+                            kobo_id=_short_uuid(book.kobo_content_id),
                             title=book.title,
                             error=str(e),
                         )
                         session.add_error(f"Failed to sync book '{book.title}': {e}")
-
-                # Atomic cache update at session end (T064, FR-033)
-                if highlights_to_cache and not dry_run:
-                    try:
-                        self.cache_manager.atomic_update_highlights(highlights_to_cache)
-                        logger.info(
-                            "cache_updated_atomically",
-                            highlights_count=len(highlights_to_cache),
-                        )
-                    except CacheCorruptionError as e:
-                        logger.error("cache_update_failed", error=str(e))
-                        session.add_error(f"Failed to update cache: {e}")
 
             session.complete()
             logger.info(
@@ -301,12 +359,22 @@ class SyncManager:
                 status=session.status.value,
                 books_processed=session.books_processed,
                 highlights_synced=session.highlights_synced,
-                highlights_skipped=session.highlights_skipped,
-                cache_hits=session.cache_hits,
-                cache_misses=session.cache_misses,
-                deduplication_rate_percent=f"{session.deduplication_rate:.1f}%",
                 duration_seconds=session.duration_seconds,
+                books_deleted_for_re_sync=len(books_to_delete_ids),
             )
+            
+            # Update database title with total book count
+            try:
+                total_books = len(books)
+                self.notion_client.update_database_title(
+                    database_id=self.config.notion.database_id,
+                    total_books=total_books,
+                )
+            except Exception as e:
+                logger.warning(
+                    "database_title_update_failed_continuing",
+                    error=str(e),
+                )
 
             return session
 
@@ -357,6 +425,7 @@ class SyncManager:
         """
         page_id = None
         cover_success = False
+        book_id_short = _short_uuid(book.kobo_content_id)
         
         try:
             # Check if book already exists in Notion
@@ -366,39 +435,48 @@ class SyncManager:
             )
             
             if existing_page:
-                # Update existing book (T056, T076A, FR-027)
+                # Book exists - get its previous last_read_date for reading period calculation
+                # Note: This book was already filtered in Step 2.7 to have changed last_read_date
+                notion_last_read = self.notion_client.get_book_last_read_date(existing_page)
                 page_id = existing_page.get("id")
                 
                 logger.info(
-                    "updating_existing_book",
+                    "updating_existing_book_last_read_changed",
+                    kobo_id=book_id_short,
                     page_id=page_id,
                     title=book.title,
+                    notion_last_read=notion_last_read.date() if notion_last_read else None,
+                    kobo_last_read=book.date_last_read.date() if book.date_last_read else None,
                 )
                 
+                # Update book metadata
                 self.notion_client.update_book_page(
                     page_id=page_id,
                     progress_code=book.progress_code,
+                    percent_read=book.percent_read / 100.0,
                     description=book.description if self.config.notion.has_description_property else None,
-                    time_spent=book.time_spent_reading if self.config.notion.has_time_spent_property else None,
+                    time_spent=book.time_spent_formatted if self.config.notion.has_time_spent_property else None,
+                    last_read_date=book.date_last_read,
                 )
                 
                 # Update status to Completed if applicable (T061, FR-024)
-                if book.progress_code == "Completed":
+                if book.progress_code == "Finished":
                     self.notion_client.update_book_status_to_completed(
                         page_id=page_id,
-                        completion_date=book.date_last_read,
+                        completion_date=book.date_finished,
                     )
             
             else:
                 # Create new book page (T055, FR-028)
                 logger.info(
                     "creating_new_book",
+                    kobo_id=book_id_short,
                     title=book.title,
                     author=book.author,
                 )
                 
-                # Map progress_code to status ("Completed" -> "Finished")
-                status_map = {"New": "New", "Reading": "Reading", "Completed": "Finished"}
+                # Map progress_code to status ("Finished" -> "Finished")
+                status_map = {"New": "New", "Reading": "Reading", "Finished": "Finished"}
                 status = status_map.get(book.progress_code, "New")
                 
                 page_id = self.notion_client.create_book_page(
@@ -412,8 +490,13 @@ class SyncManager:
                     publisher=book.publisher,
                     kobo_content_id=book.kobo_content_id,
                     description=book.description if self.config.notion.has_description_property else None,
-                    time_spent=book.time_spent_reading if self.config.notion.has_time_spent_property else None,
+                    time_spent=book.time_spent_formatted if self.config.notion.has_time_spent_property else None,
+                    finished_date=book.date_finished if book.read_status == 2 else None,
+                    last_read_date=book.date_last_read,
                 )
+                
+                # New books don't have a previous reading period
+                notion_last_read = None
             
             # Try to set cover image (T096, T097, FR-017A, SC-028)
             # This is non-blocking - if it fails, we continue with the sync
@@ -421,6 +504,7 @@ class SyncManager:
                 try:
                     logger.info(
                         "retrieving_cover_image",
+                        kobo_id=book_id_short,
                         isbn=book.isbn,
                         title=book.title,
                     )
@@ -439,12 +523,14 @@ class SyncManager:
                         cover_success = True
                         logger.info(
                             "cover_image_set_success",
+                            kobo_id=book_id_short,
                             page_id=page_id,
                             url=cover_url,
                         )
                     else:
                         logger.info(
                             "cover_image_not_found",
+                            kobo_id=book_id_short,
                             isbn=book.isbn,
                             title=book.title,
                         )
@@ -453,37 +539,64 @@ class SyncManager:
                     # Cover image failures should not block sync (SC-028)
                     logger.warning(
                         "cover_image_failed_continuing",
+                        kobo_id=book_id_short,
                         page_id=page_id,
                         error=str(e),
                     )
             
             # Update page content with highlights (T057-T057F, FR-028B)
             if page_id and highlights:
-                self.notion_client.create_highlight_blocks(
-                    page_id=page_id,
-                    highlights=[
-                        {
-                            "text": h.text,
-                            "chapter_progress": h.chapter_progress,
-                            "date_created": h.date_created,
-                            "annotation": h.annotation,
-                        }
-                        for h in highlights
-                    ],
-                )
+                # Check if this is an update to existing book (book was re-read)
+                is_book_update = existing_page is not None
+                
+                highlights_data = [
+                    {
+                        "text": h.text,
+                        "chapter_progress": h.chapter_progress,
+                        "date_created": h.date_created,
+                        "annotation": h.annotation,
+                    }
+                    for h in highlights
+                ]
+                
+                if is_book_update:
+                    # Book was re-read - update highlights with reading period info
+                    # Delete old highlights and recreate with new reading period
+                    logger.info(
+                        "updating_highlights_for_reread_book",
+                        kobo_id=book_id_short,
+                        page_id=page_id,
+                        title=book.title,
+                        last_read_date=book.date_last_read.isoformat() if book.date_last_read else None,
+                    )
+                    
+                    self.notion_client.update_highlight_blocks(
+                        page_id=page_id,
+                        highlights=highlights_data,
+                        start_read_date=notion_last_read,  # Previous last_read_date is now the start
+                        last_read_date=book.date_last_read,  # Current last_read_date is now the end
+                    )
+                else:
+                    # New book - create highlights with initial reading period
+                    self.notion_client.create_highlight_blocks(
+                        page_id=page_id,
+                        highlights=highlights_data,
+                        start_read_date=book.date_started,
+                        last_read_date=book.date_last_read,
+                    )
             
             # Update sync metadata (Last Sync Time and Highlights Count)
             if page_id:
-                from datetime import datetime
                 self.notion_client.update_sync_metadata(
                     page_id=page_id,
                     highlights_count=len(highlights),
-                    sync_time=datetime.now(),
+                    sync_time=datetime.now(timezone.utc).astimezone(),
                 )
             
             # Log cover image result (T097, FR-051)
             logger.info(
                 "book_sync_complete",
+                kobo_id=book_id_short,
                 page_id=page_id,
                 title=book.title,
                 highlights_count=len(highlights),
@@ -495,6 +608,7 @@ class SyncManager:
         except NotionValidationError as e:
             logger.error(
                 "book_sync_failed",
+                kobo_id=book_id_short,
                 title=book.title,
                 error=str(e),
             )
@@ -503,6 +617,7 @@ class SyncManager:
         except Exception as e:
             logger.error(
                 "book_sync_unexpected_error",
+                kobo_id=book_id_short,
                 title=book.title,
                 error=str(e),
             )

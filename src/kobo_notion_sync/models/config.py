@@ -89,7 +89,6 @@ class LoggingConfig(BaseModel):
     """Logging and storage configuration."""
 
     level: str = Field(default="INFO", description="Log level")
-    cache_dir: Optional[Path] = Field(default=None, description="Cache directory path")
     log_dir: Optional[Path] = Field(default=None, description="Log directory path")
 
     @field_validator("level")
@@ -101,7 +100,7 @@ class LoggingConfig(BaseModel):
             raise ValueError(f"level must be one of: {', '.join(valid_levels)}")
         return v
 
-    @field_validator("cache_dir", "log_dir")
+    @field_validator("log_dir")
     @classmethod
     def validate_directory_path(cls, v: Optional[Path]) -> Optional[Path]:
         """Ensure directory paths are absolute if provided."""
@@ -117,13 +116,6 @@ class Configuration(BaseModel):
     kobo: KoboConfig
     sync: SyncConfig = Field(default_factory=SyncConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
-
-    @property
-    def cache_directory(self) -> Path:
-        """Get cache directory, using default if not specified."""
-        if self.logging.cache_dir:
-            return self.logging.cache_dir
-        return Path.home() / ".kobo-notion-sync" / "cache"
 
     @property
     def log_directory(self) -> Path:

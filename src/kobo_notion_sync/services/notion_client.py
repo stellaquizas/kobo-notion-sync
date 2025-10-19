@@ -1,7 +1,7 @@
 """Notion API client wrapper for kobo-notion-sync."""
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional
 
@@ -85,7 +85,7 @@ class NotionClient:
         self.token = token
         self._client = Client(auth=token)
         self._database_has_type_property = {}  # Cache for Type property existence
-        logger.info("notion_client_initialized")
+        logger.debug("notion_client_initialized")
     
     def _check_type_property_exists(self, database_id: str) -> bool:
         """Check if database has Type property (internal helper).
@@ -133,7 +133,7 @@ class NotionClient:
             workspace_id = bot_info.get("id", "")
             bot_id = bot_info.get("bot", {}).get("owner", {}).get("workspace", "")
             
-            logger.info(
+            logger.debug(
                 "notion_token_validated",
                 workspace_name=workspace_name,
                 workspace_id=workspace_id,
@@ -264,8 +264,7 @@ class NotionClient:
             required_properties = {
                 "Name": "title",
                 "Category": "select",
-                "Date Done #1": "date",
-                "Progress Code": "select",
+                "Finished Date": "date",
                 "Type": "select",
             }
             
@@ -288,19 +287,8 @@ class NotionClient:
                             "reason": "type_mismatch",
                         })
             
-            # Validate select options for Progress Code and Type
+            # Validate select options for Type
             invalid_select_options = {}
-            
-            # Check Progress Code options
-            if "Progress Code" in properties:
-                progress_prop = properties["Progress Code"]
-                if progress_prop.get("type") == "select":
-                    options = progress_prop.get("select", {}).get("options", [])
-                    option_names = [opt.get("name") for opt in options]
-                    required_options = ["New", "Reading", "Completed"]
-                    missing_options = [opt for opt in required_options if opt not in option_names]
-                    if missing_options:
-                        invalid_select_options["Progress Code"] = missing_options
             
             # Check Type options
             if "Type" in properties:
@@ -422,25 +410,11 @@ class NotionClient:
                 },
                 "Category": {
                     "select": {
-                        "options": [
-                            {"name": "Fiction", "color": "blue"},
-                            {"name": "Non-Fiction", "color": "green"},
-                            {"name": "Reference", "color": "yellow"},
-                        ]
+                        "options": []
                     }
                 },
-                "Date Done #1": {
+                "Finished Date": {
                     "date": {}  # Date property for completion date
-                },
-                # Note: Cover images use page covers, not a property
-                "Progress Code": {
-                    "select": {
-                        "options": [
-                            {"name": "New", "color": "gray"},
-                            {"name": "Reading", "color": "blue"},
-                            {"name": "Completed", "color": "green"},
-                        ]
-                    }
                 },
                 "Type": {
                     "select": {
@@ -532,7 +506,7 @@ class NotionClient:
             
             if include_time_spent:
                 properties["Time Spent"] = {
-                    "number": {}
+                    "rich_text": {}
                 }
             
             response = self._client.databases.update(
@@ -583,7 +557,7 @@ class NotionClient:
         - Description (rich_text) - Book summary/description
         - Status (select) - Reading status: New / Reading / Finished
         - Progress (number/percent) - Reading progress percentage (0-100%)
-        - Time Spent (number) - Reading time in minutes
+        - Time Spent (rich_text) - Reading time in human-readable format (e.g., "2hr 30min")
         - Kobo Content ID (rich_text) - Internal tracking field
         - Last Sync Time (date) - Last sync timestamp
         - Highlights Count (number) - Number of synced highlights
@@ -602,29 +576,15 @@ class NotionClient:
         try:
             logger.info("initializing_empty_database", database_id=database_id)
             
-            # Define all required properties
-            properties = {
-                # User-visible metadata properties
-                "Author": {
-                    "rich_text": {}
-                },
-                "Type": {
-                    "select": {
-                        "options": [
-                            {"name": "Kobo", "color": "purple"},
-                        ]
-                    }
-                },
-                "ISBN": {
-                    "rich_text": {}
-                },
-                "Publisher": {
-                    "rich_text": {}
-                },
-                "Description": {
-                    "rich_text": {}
-                },
-                "Status": {
+            # Create properties one at a time in exact display order
+            # (Notion displays properties in creation order)
+            # Note: Name (Title) is auto-created when database is created as first column
+            
+            properties_to_create = [
+                ("Author", {"rich_text": {}}),
+                ("Category", {"select": {"options": []}}),
+                ("Description", {"rich_text": {}}),
+                ("Status", {
                     "select": {
                         "options": [
                             {"name": "New", "color": "gray"},
@@ -632,33 +592,43 @@ class NotionClient:
                             {"name": "Finished", "color": "green"},
                         ]
                     }
-                },
-                "Progress": {
-                    "number": {
-                        "format": "percent"
+                }),
+                ("Progress", {"number": {"format": "percent"}}),
+                ("Last Read Date", {"date": {}}),
+                ("Time Spent", {"rich_text": {}}),
+                ("Finished Date", {"date": {}}),
+                ("Highlights Count", {"number": {}}),
+                ("Type", {
+                    "select": {
+                        "options": [
+                            {"name": "Kobo", "color": "purple"},
+                        ]
                     }
-                },
-                "Time Spent": {
-                    "number": {}
-                },
-                # Internal tracking properties
-                "Kobo Content ID": {
-                    "rich_text": {}
-                },
-                "Last Sync Time": {
-                    "date": {}
-                },
-                "Highlights Count": {
-                    "number": {}
-                },
-            }
+                }),
+                ("Last Sync Time", {"date": {}}),
+                ("Publisher", {"rich_text": {}}),
+                ("ISBN", {"rich_text": {}}),
+                ("Kobo Content ID", {"rich_text": {}}),
+            ]
             
-            # Update database with all properties
-            response = self._client.databases.update(
-                database_id=database_id,
-                properties=properties,
-            )
+            # Create each property sequentially to maintain order
+            for prop_name, prop_config in properties_to_create:
+                try:
+                    self._client.databases.update(
+                        database_id=database_id,
+                        properties={prop_name: prop_config},
+                    )
+                    logger.info("property_created", database_id=database_id, property_name=prop_name)
+                except Exception as e:
+                    logger.warning(
+                        "property_creation_failed_continuing",
+                        database_id=database_id,
+                        property_name=prop_name,
+                        error=str(e),
+                    )
             
+            # Get final response with all properties
+            response = self._client.databases.retrieve(database_id)
             created_properties = response.get("properties", {})
             property_names = list(created_properties.keys())
             
@@ -769,6 +739,223 @@ class NotionClient:
             )
     
     @retry_with_backoff(max_retries=3, initial_wait=1.0)
+    def update_database_title(self, database_id: str, total_books: int) -> None:
+        """Update database title with total book count (T### - Dynamic tracking).
+        
+        Updates the database title to show format: "Book Tracker (Total: 63)"
+        Notion API requires title as array of rich text objects.
+        
+        Args:
+            database_id: Notion database ID
+            total_books: Total number of books in library
+        
+        Raises:
+            NotionValidationError: If title update fails
+        """
+        try:
+            new_title = f"Book Tracker (Total: {total_books})"
+            
+            # Notion API requires title as array of rich text objects
+            response = self._client.databases.update(
+                database_id=database_id,
+                title=[
+                    {
+                        "type": "text",
+                        "text": {
+                            "content": new_title
+                        }
+                    }
+                ],
+            )
+            
+            logger.info(
+                "database_title_updated",
+                database_id=database_id,
+                new_title=new_title,
+                total_books=total_books,
+            )
+            
+            return response
+        
+        except APIResponseError as e:
+            error_code = e.code if hasattr(e, 'code') else "unknown"
+            
+            if error_code == "unauthorized":
+                logger.warning(
+                    "database_title_update_unauthorized",
+                    database_id=database_id,
+                    error=str(e),
+                )
+            else:
+                logger.warning(
+                    "database_title_update_failed",
+                    database_id=database_id,
+                    error=str(e),
+                )
+        
+        except Exception as e:
+            logger.warning(
+                "database_title_update_error",
+                database_id=database_id,
+                error=str(e),
+            )
+    
+    @retry_with_backoff(max_retries=3, initial_wait=1.0)
+    def add_database_description(self, database_id: str) -> None:
+        """Add GitHub project description to database (promotion).
+        
+        Adds a description that links to the GitHub repository and 
+        mentions the automation tool.
+        
+        Args:
+            database_id: Notion database ID
+        """
+        try:
+            description = [
+                {
+                    "type": "text",
+                    "text": {
+                        "content": "💁🏻‍♀️ Synced with kobo-notion-sync • ",
+                        "link": None
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": {
+                        "content": "GitHub",
+                        "link": {
+                            "url": "https://github.com/stellaquizas/kobo-notion-sync"
+                        }
+                    }
+                }
+            ]
+            
+            response = self._client.databases.update(
+                database_id=database_id,
+                description=description,
+            )
+            
+            logger.info(
+                "database_description_added",
+                database_id=database_id,
+            )
+            
+            return response
+        
+        except Exception as e:
+            logger.warning(
+                "database_description_add_failed",
+                database_id=database_id,
+                error=str(e),
+            )
+
+    @retry_with_backoff(max_retries=3, initial_wait=1.0)
+    def delete_all_kobo_books(self, database_id: str) -> int:
+        """Delete all Kobo-type books from database (for full sync reset).
+        
+        Queries database for all pages with Type='Kobo' and deletes them.
+        This is used when running sync --full to start with a clean slate.
+        
+        Args:
+            database_id: Notion database ID
+        
+        Returns:
+            Number of books deleted
+        
+        Raises:
+            NotionValidationError: If deletion fails
+        """
+        try:
+            deleted_count = 0
+            has_type_property = self._check_type_property_exists(database_id)
+            
+            # Query for all Kobo books
+            if has_type_property:
+                query_filter = {
+                    "property": "Type",
+                    "select": {
+                        "equals": "Kobo"
+                    }
+                }
+            else:
+                # If no Type property, we can't safely delete, so just return 0
+                logger.warning(
+                    "delete_all_kobo_books_no_type_property",
+                    database_id=database_id,
+                )
+                return 0
+            
+            # Paginate through all results
+            has_more = True
+            start_cursor = None
+            
+            while has_more:
+                response = self._client.databases.query(
+                    database_id=database_id,
+                    filter=query_filter,
+                    page_size=100,
+                    start_cursor=start_cursor,
+                )
+                
+                results = response.get("results", [])
+                
+                # Delete each page
+                for page in results:
+                    try:
+                        page_id = page.get("id")
+                        self._client.pages.update(
+                            page_id=page_id,
+                            archived=True,
+                        )
+                        deleted_count += 1
+                        logger.debug(
+                            "kobo_book_deleted",
+                            page_id=page_id,
+                            deleted_count=deleted_count,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "delete_kobo_book_failed",
+                            page_id=page.get("id"),
+                            error=str(e),
+                        )
+                
+                # Check for pagination
+                has_more = response.get("has_more", False)
+                start_cursor = response.get("next_cursor")
+            
+            logger.info(
+                "delete_all_kobo_books_completed",
+                database_id=database_id,
+                deleted_count=deleted_count,
+            )
+            
+            return deleted_count
+        
+        except APIResponseError as e:
+            logger.error(
+                "delete_all_kobo_books_failed",
+                database_id=database_id,
+                error=str(e),
+                error_code=e.code if hasattr(e, 'code') else "unknown",
+            )
+            raise NotionValidationError(
+                f"Failed to delete Kobo books: {str(e)}",
+                details={"error_code": e.code if hasattr(e, 'code') else "unknown"},
+            )
+        
+        except Exception as e:
+            logger.error(
+                "delete_all_kobo_books_error",
+                database_id=database_id,
+                error=str(e),
+            )
+            raise NotionValidationError(
+                f"Unexpected error deleting Kobo books: {str(e)}"
+            )
+
+    
+    @retry_with_backoff(max_retries=3, initial_wait=1.0)
     def create_book_page(
         self,
         database_id: str,
@@ -782,6 +969,8 @@ class NotionClient:
         kobo_content_id: Optional[str] = None,
         description: Optional[str] = None,
         time_spent: Optional[int] = None,
+        finished_date: Optional[datetime] = None,
+        last_read_date: Optional[datetime] = None,
     ) -> str:
         """Create a new book page in Notion database (T055, FR-028).
         
@@ -797,6 +986,7 @@ class NotionClient:
             kobo_content_id: Optional Kobo Content ID for tracking
             description: Optional book description (plain text, HTML stripped)
             time_spent: Optional time spent reading in minutes
+            finished_date: Optional date when book was finished
         
         Returns:
             Page ID of created page
@@ -821,7 +1011,7 @@ class NotionClient:
                     "select": {"name": status}
                 },
                 "Progress": {
-                    "number": progress_percent / 100.0  # Convert to 0.0-1.0 for percent format
+                    "number": progress_percent / 100.0  # Convert 0-100 to 0-1 for percent format
                 },
                 "Type": {
                     "select": {"name": page_type}
@@ -851,7 +1041,32 @@ class NotionClient:
                     }
             
             if time_spent is not None:
-                properties["Time Spent"] = {"number": time_spent}
+                # Store time_spent as rich_text formatted string (e.g., "2hr 30min")
+                # time_spent can be either formatted string or raw minutes integer
+                if isinstance(time_spent, str):
+                    # Already formatted, use as-is
+                    time_text = time_spent
+                else:
+                    # Raw minutes, should not happen here but handle it
+                    time_text = str(time_spent)
+                
+                properties["Time Spent"] = {
+                    "rich_text": [{"type": "text", "text": {"content": time_text}}]
+                }
+            
+            if finished_date is not None:
+                properties["Finished Date"] = {
+                    "date": {
+                        "start": finished_date.strftime("%Y-%m-%d") if isinstance(finished_date, datetime) else finished_date
+                    }
+                }
+            
+            if last_read_date is not None:
+                properties["Last Read Date"] = {
+                    "date": {
+                        "start": last_read_date.strftime("%Y-%m-%d") if isinstance(last_read_date, datetime) else last_read_date
+                    }
+                }
             
             # Create page
             response = self._client.pages.create(
@@ -957,6 +1172,8 @@ class NotionClient:
         self,
         page_id: str,
         highlights: List[Dict[str, Any]],
+        start_read_date: Optional[datetime] = None,
+        last_read_date: Optional[datetime] = None,
     ) -> int:
         """Create highlight blocks in a Notion page (T057-T057F, FR-028B).
         
@@ -964,7 +1181,7 @@ class NotionClient:
         - Heading 2: "📖 Highlights (count)" section header
         - For each highlight:
           - Heading 3: Highlight text
-          - Paragraph: Bold metadata "chapter_position • date"
+          - Paragraph: Bold metadata "chapter_position • date_created • reading_period"
           - Divider block
         - Heading 2: "📊 Statistics" section
         - Table with statistics
@@ -976,6 +1193,8 @@ class NotionClient:
                 - chapter_progress: Location (0-100%)
                 - date_created: Datetime object or ISO string
                 - annotation: Optional user note
+            start_read_date: Optional start reading date (for duration calculation)
+            last_read_date: Optional last reading date (for duration calculation)
         
         Returns:
             Number of blocks created
@@ -1032,7 +1251,60 @@ class NotionClient:
                 else:
                     location_str = "Unknown location"
                 
-                metadata_text = f"{location_str} • {date_str}"
+                # Calculate reading period duration
+                reading_period_str = ""
+                if start_read_date and last_read_date:
+                    try:
+                        # Convert to datetime if needed, ensuring timezone-aware comparison
+                        if isinstance(start_read_date, str):
+                            start = datetime.fromisoformat(start_read_date.replace("Z", "+00:00"))
+                        else:
+                            start = start_read_date if isinstance(start_read_date, datetime) else datetime.fromisoformat(str(start_read_date))
+                        
+                        if isinstance(last_read_date, str):
+                            last = datetime.fromisoformat(last_read_date.replace("Z", "+00:00"))
+                        else:
+                            last = last_read_date if isinstance(last_read_date, datetime) else datetime.fromisoformat(str(last_read_date))
+                        
+                        # Ensure both are comparable (both naive or both aware)
+                        if start.tzinfo is not None and last.tzinfo is None:
+                            # Make last timezone-aware
+                            from datetime import timezone
+                            last = last.replace(tzinfo=timezone.utc)
+                        elif start.tzinfo is None and last.tzinfo is not None:
+                            # Make start timezone-aware
+                            from datetime import timezone
+                            start = start.replace(tzinfo=timezone.utc)
+                        
+                        # If both are timezone-aware, convert to naive for simpler display
+                        if start.tzinfo and last.tzinfo:
+                            start = start.replace(tzinfo=None)
+                            last = last.replace(tzinfo=None)
+                        
+                        duration = last - start
+                        days = duration.days
+                        
+                        if days == 0:
+                            reading_period_str = "Same day"
+                        elif days == 1:
+                            reading_period_str = "1 day"
+                        else:
+                            reading_period_str = f"{days} days"
+                        
+                        date_range_str = f"{start.strftime('%Y-%m-%d')} to {last.strftime('%Y-%m-%d')} ({reading_period_str})"
+                    except Exception as e:
+                        logger.warning("reading_period_calculation_failed", error=str(e))
+                        date_range_str = f"Start: {start_read_date}, Last: {last_read_date}"
+                elif start_read_date:
+                    start = start_read_date if isinstance(start_read_date, datetime) else datetime.fromisoformat(str(start_read_date))
+                    date_range_str = f"Started: {start.strftime('%Y-%m-%d')}"
+                elif last_read_date:
+                    last = last_read_date if isinstance(last_read_date, datetime) else datetime.fromisoformat(str(last_read_date))
+                    date_range_str = f"Last read: {last.strftime('%Y-%m-%d')}"
+                else:
+                    date_range_str = date_str
+                
+                metadata_text = f"{location_str} • {date_range_str}"
                 
                 blocks.append({
                     "object": "block",
@@ -1114,14 +1386,116 @@ class NotionClient:
             )
     
     @retry_with_backoff(max_retries=3, initial_wait=1.0)
+    def update_highlight_blocks(
+        self,
+        page_id: str,
+        highlights: List[Dict[str, Any]],
+        start_read_date: Optional[datetime] = None,
+        last_read_date: Optional[datetime] = None,
+    ) -> int:
+        """Update highlight blocks when book is re-read (delete old and recreate).
+        
+        Removes old highlights section and recreates with updated dates and duration.
+        This is called when last_read_date changes for a book.
+        
+        Args:
+            page_id: Notion page ID to update
+            highlights: List of highlight dicts with updated information
+            start_read_date: Optional start reading date (for duration calculation)
+            last_read_date: Optional last reading date (for duration calculation)
+        
+        Returns:
+            Number of blocks created
+        
+        Raises:
+            NotionValidationError: If update fails
+        """
+        try:
+            # Delete existing highlights section by removing blocks
+            # First, retrieve current blocks to find highlight section
+            page_blocks = self._client.blocks.children.list(block_id=page_id)
+            
+            # Find the indices of highlights and statistics sections
+            highlights_start_idx = None
+            statistics_idx = None
+            
+            results = page_blocks.get("results", [])
+            for idx, block in enumerate(results):
+                block_type = block.get("type")
+                
+                # Check if this is the highlights section heading
+                if block_type == "heading_2":
+                    heading_content = block.get("heading_2", {}).get("rich_text", [])
+                    if heading_content:
+                        content_text = heading_content[0].get("text", {}).get("content", "")
+                        if "📖 Highlights" in content_text and highlights_start_idx is None:
+                            highlights_start_idx = idx
+                        elif "📊 Statistics" in content_text:
+                            statistics_idx = idx
+                            break  # Found statistics, stop searching
+            
+            # Delete blocks from highlights section (exclusive) to statistics section (exclusive)
+            if highlights_start_idx is not None:
+                # Determine the end index for deletion
+                delete_until_idx = statistics_idx if statistics_idx is not None else len(results)
+                
+                # Delete blocks in reverse order to avoid index shifting issues
+                for idx in range(delete_until_idx - 1, highlights_start_idx, -1):
+                    block_id = results[idx].get("id")
+                    try:
+                        self._client.blocks.delete(block_id=block_id)
+                        logger.debug("highlight_block_deleted", block_id=block_id, index=idx)
+                    except Exception as e:
+                        logger.warning("delete_block_failed", block_id=block_id, error=str(e))
+                
+                # Also delete the highlights heading block itself
+                highlights_heading_id = results[highlights_start_idx].get("id")
+                try:
+                    self._client.blocks.delete(block_id=highlights_heading_id)
+                    logger.debug("highlights_heading_deleted", block_id=highlights_heading_id)
+                except Exception as e:
+                    logger.warning("delete_highlights_heading_failed", block_id=highlights_heading_id, error=str(e))
+            
+            # Now recreate the highlights section with updated dates
+            blocks_created = self.create_highlight_blocks(
+                page_id=page_id,
+                highlights=highlights,
+                start_read_date=start_read_date,
+                last_read_date=last_read_date,
+            )
+            
+            logger.info(
+                "highlight_blocks_updated",
+                page_id=page_id,
+                blocks_created=blocks_created,
+                highlights_count=len(highlights),
+                last_read_date=last_read_date.isoformat() if last_read_date else None,
+            )
+            
+            return blocks_created
+        
+        except APIResponseError as e:
+            logger.error("update_highlight_blocks_failed", page_id=page_id, error=str(e))
+            raise NotionValidationError(
+                f"Failed to update highlight blocks: {str(e)}",
+                details={"error_code": e.code if hasattr(e, 'code') else "unknown"},
+            )
+        
+        except Exception as e:
+            logger.error("update_highlight_blocks_error", page_id=page_id, error=str(e))
+            raise NotionValidationError(
+                f"Unexpected error updating highlight blocks: {str(e)}"
+            )
+    
+    @retry_with_backoff(max_retries=3, initial_wait=1.0)
     def update_book_status_to_completed(
         self,
         page_id: str,
         completion_date: Optional[datetime] = None,
     ) -> None:
-        """Update book page when status changes from Reading to Completed (T061, FR-024).
+        """Update book page when status changes from Reading to Finished (T061, FR-024).
         
-        Sets Date Done #1 property to mark book as finished.
+        Sets Finished Date property to mark book as finished.
         
         Args:
             page_id: Notion page ID to update
@@ -1132,16 +1506,16 @@ class NotionClient:
         """
         try:
             if completion_date is None:
-                completion_date = datetime.now()
+                completion_date = datetime.now(timezone.utc).astimezone()
             
             # Update page properties
             self._client.pages.update(
                 page_id=page_id,
                 properties={
-                    "Progress Code": {
-                        "select": {"name": "Completed"}
+                    "Status": {
+                        "select": {"name": "Finished"}
                     },
-                    "Date Done #1": {
+                    "Finished Date": {
                         "date": {
                             "start": completion_date.strftime("%Y-%m-%d")
                         }
@@ -1264,6 +1638,106 @@ class NotionClient:
                 f"Unexpected error listing Kobo books: {str(e)}"
             )
     
+    def get_kobo_books_mapping(self, database_id: str) -> Dict[str, Dict[str, Any]]:
+        """Get fast mapping of Kobo Content ID -> (page_id, last_read_date) for all Kobo books.
+        
+        Single batch query returns all Kobo books with their tracking properties.
+        
+        Args:
+            database_id: Notion database ID
+        
+        Returns:
+            Dict mapping Kobo Content ID to {page_id, last_read_date, all_properties}
+        
+        Raises:
+            NotionValidationError: If query fails
+        """
+        try:
+            books = self.list_kobo_books(database_id)
+            
+            mapping = {}
+            for book in books:
+                props = book.get("properties", {})
+                
+                # Extract Kobo Content ID
+                kobo_id_prop = props.get("Kobo Content ID", {})
+                kobo_id_content = kobo_id_prop.get("rich_text", [])
+                if not kobo_id_content:
+                    continue
+                
+                kobo_id = kobo_id_content[0].get("text", {}).get("content", "")
+                if not kobo_id:
+                    continue
+                
+                # Extract Last Read Date
+                last_read_prop = props.get("Last Read Date", {})
+                last_read_date = last_read_prop.get("date", {})
+                last_read_value = last_read_date.get("start") if last_read_date else None
+                
+                mapping[kobo_id] = {
+                    "page_id": book.get("id"),
+                    "last_read_date": last_read_value,
+                    "properties": props,
+                    "full_page": book,
+                }
+            
+            logger.info(
+                "kobo_books_mapping_created",
+                database_id=database_id,
+                book_count=len(mapping),
+            )
+            
+            return mapping
+        
+        except NotionValidationError:
+            raise
+        except Exception as e:
+            logger.error("get_kobo_books_mapping_failed", error=str(e))
+            raise NotionValidationError(f"Failed to get Kobo books mapping: {str(e)}")
+    
+    def delete_pages_batch(self, page_ids: List[str]) -> int:
+        """Delete multiple pages in parallel (as fast as Notion API allows).
+        
+        Args:
+            page_ids: List of page IDs to delete
+        
+        Returns:
+            Number of pages deleted
+        
+        Raises:
+            NotionValidationError: If deletion fails
+        """
+        if not page_ids:
+            return 0
+        
+        try:
+            deleted_count = 0
+            for page_id in page_ids:
+                try:
+                    self._client.pages.update(
+                        page_id=page_id,
+                        archived=True,  # Archive (soft delete) instead of permanent delete
+                    )
+                    deleted_count += 1
+                except Exception as e:
+                    logger.warning(
+                        "delete_page_failed_continuing",
+                        page_id=page_id,
+                        error=str(e),
+                    )
+            
+            logger.info(
+                "pages_batch_deleted",
+                requested=len(page_ids),
+                deleted=deleted_count,
+            )
+            
+            return deleted_count
+        
+        except Exception as e:
+            logger.error("delete_pages_batch_failed", error=str(e))
+            raise NotionValidationError(f"Failed to delete pages: {str(e)}")
+    
     @retry_with_backoff(max_retries=3, initial_wait=1.0)
     def get_book_by_kobo_id(
         self,
@@ -1359,6 +1833,39 @@ class NotionClient:
                 f"Unexpected error getting book by Kobo ID: {str(e)}"
             )
     
+    def get_book_last_read_date(
+        self,
+        page: Dict[str, Any],
+    ) -> Optional[datetime]:
+        """Extract Last Read Date from a Notion book page.
+        
+        Args:
+            page: Notion page dictionary
+        
+        Returns:
+            datetime if Last Read Date exists, None otherwise
+        """
+        try:
+            properties = page.get("properties", {})
+            last_read_date_prop = properties.get("Last Read Date", {})
+            
+            if isinstance(last_read_date_prop, dict):
+                date_value = last_read_date_prop.get("date", {})
+                if isinstance(date_value, dict):
+                    start_date = date_value.get("start")
+                    if start_date:
+                        # Parse ISO date string to datetime
+                        return datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+            
+            return None
+        
+        except Exception as e:
+            logger.warning(
+                "failed_to_extract_last_read_date",
+                error=str(e),
+            )
+            return None
+    
     @retry_with_backoff(max_retries=3, initial_wait=1.0)
     def update_book_page(
         self,
@@ -1367,6 +1874,7 @@ class NotionClient:
         percent_read: Optional[float] = None,
         description: Optional[str] = None,
         time_spent: Optional[int] = None,
+        last_read_date: Optional[datetime] = None,
     ) -> None:
         """Update existing book page properties with pre-modification check (T056, T077, FR-027).
         
@@ -1376,10 +1884,11 @@ class NotionClient:
         
         Args:
             page_id: Notion page ID to update
-            progress_code: Optional new Progress Code ("New", "Reading", "Completed")
+            progress_code: Optional new status ("New", "Reading", "Finished")
             percent_read: Optional reading progress percentage
             description: Optional book description (HTML)
             time_spent: Optional time spent reading in minutes
+            last_read_date: Optional last read date
         
         Raises:
             NotionValidationError: If page update fails or page is not a Kobo book
@@ -1389,7 +1898,7 @@ class NotionClient:
             properties: Dict[str, Any] = {}
             
             if progress_code is not None:
-                properties["Progress Code"] = {
+                properties["Status"] = {
                     "select": {"name": progress_code}
                 }
             
@@ -1402,8 +1911,24 @@ class NotionClient:
                 }
             
             if time_spent is not None:
+                # Store time_spent as rich_text formatted string (e.g., "2hr 30min")
+                # time_spent can be either formatted string or raw minutes integer
+                if isinstance(time_spent, str):
+                    # Already formatted, use as-is
+                    time_text = time_spent
+                else:
+                    # Raw minutes, should not happen here but handle it
+                    time_text = str(time_spent)
+                
                 properties["Time Spent"] = {
-                    "number": time_spent
+                    "rich_text": [{"type": "text", "text": {"content": time_text}}]
+                }
+            
+            if last_read_date is not None:
+                properties["Last Read Date"] = {
+                    "date": {
+                        "start": last_read_date.strftime("%Y-%m-%d") if isinstance(last_read_date, datetime) else last_read_date
+                    }
                 }
             
             # Update page if there are properties to update
@@ -1464,7 +1989,7 @@ class NotionClient:
         """
         try:
             if sync_time is None:
-                sync_time = datetime.now()
+                sync_time = datetime.now(timezone.utc).astimezone()
             
             properties = {
                 "Last Sync Time": {

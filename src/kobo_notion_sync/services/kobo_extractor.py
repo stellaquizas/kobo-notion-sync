@@ -2,7 +2,7 @@
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Dict, Any
 
@@ -73,7 +73,7 @@ class KoboExtractor:
         """
         self.mount_path = mount_path
         self._device_info: Optional[Dict[str, Any]] = None
-        logger.info("kobo_extractor_initialized", mount_path=str(mount_path) if mount_path else None)
+        logger.debug("kobo_extractor_initialized", mount_path=str(mount_path) if mount_path else None)
     
     def detect_device(self) -> Path:
         """Detect Kobo device by scanning /Volumes/ for known mount names.
@@ -108,7 +108,7 @@ class KoboExtractor:
             candidate_path = volumes_path / mount_name
             if candidate_path.exists() and self._verify_mount_path(candidate_path):
                 self.mount_path = candidate_path
-                logger.info("kobo_device_auto_detected", mount_path=str(self.mount_path))
+                logger.debug("kobo_device_auto_detected", mount_path=str(self.mount_path))
                 return self.mount_path
         
         # Device not found
@@ -242,7 +242,7 @@ class KoboExtractor:
             "is_recognized": is_recognized,
         }
         
-        logger.info("device_info_retrieved", device_info=self._device_info)
+        logger.debug("device_info_retrieved", device_info=self._device_info)
         return self._device_info
     
     def _get_device_model_from_db(self, db_path: Path) -> Optional[str]:
@@ -412,7 +412,10 @@ class KoboExtractor:
             
             # Query books from content table (ContentType=6 = EPUB ebooks only)
             # Exclude audiobooks (ContentType=9) and articles (ContentType=899)
-            # Filter for owned books: IsDownloaded = true AND Accessibility = 1
+            # Filter for owned books: Accessibility = 1
+            # Include books that are either:
+            # - Downloaded to device (IsDownloaded = 'true')
+            # - In library but not yet downloaded (to include "New" books)
             # (Accessibility: -1=not accessible, 1=owned, 6=preview/sample)
             query = """
                 SELECT 
@@ -424,12 +427,13 @@ class KoboExtractor:
                     ___PercentRead as percent_read,
                     ReadStatus as read_status,
                     DateLastRead as date_last_read,
+                    LastTimeFinishedReading as date_finished,
+                    LastTimeStartedReading as date_started,
                     ContentType as content_type,
                     Description as description,
                     TimeSpentReading as time_spent_reading
                 FROM content
                 WHERE ContentType = 6
-                    AND IsDownloaded = 'true'
                     AND Accessibility = 1
                 ORDER BY DateLastRead DESC NULLS LAST
             """
@@ -465,6 +469,24 @@ class KoboExtractor:
                         except Exception as e:
                             logger.warning("date_parsing_failed", error=str(e))
                     
+                    # Parse date_finished if present
+                    date_finished = None
+                    if row["date_finished"]:
+                        try:
+                            # Kobo stores as ISO format datetime string (LastTimeFinishedReading)
+                            date_finished = row["date_finished"]
+                        except Exception as e:
+                            logger.warning("date_finished_parsing_failed", error=str(e))
+                    
+                    # Parse date_started (first time book was opened) if present
+                    date_started = None
+                    if row["date_started"]:
+                        try:
+                            # Kobo stores as ISO format datetime string (LastTimeStartedReading)
+                            date_started = row["date_started"]
+                        except Exception as e:
+                            logger.warning("date_started_parsing_failed", error=str(e))
+                    
                     # Create Book object
                     book = Book(
                         kobo_content_id=kobo_id,
@@ -477,6 +499,8 @@ class KoboExtractor:
                         read_status=row["read_status"] or 0,
                         percent_read=row["percent_read"] or 0.0,
                         date_last_read=date_last_read,
+                        date_finished=date_finished,
+                        date_started=date_started,
                         content_type=row["content_type"],
                     )
                     
@@ -583,7 +607,7 @@ class KoboExtractor:
                     # Parse date_created
                     date_created = datetime.fromisoformat(
                         row["date_created"].replace("Z", "+00:00")
-                    ) if row["date_created"] else datetime.now()
+                    ).astimezone() if row["date_created"] else datetime.now(timezone.utc).astimezone()
                     
                     # Create Highlight object
                     highlight = Highlight(

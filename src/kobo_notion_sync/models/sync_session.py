@@ -1,6 +1,6 @@
 """Sync session model for tracking sync operations."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
@@ -32,13 +32,12 @@ class SyncSession(BaseModel):
     sync_mode: SyncMode = Field(description="Type of sync operation")
     start_time: datetime = Field(description="Sync start timestamp")
     end_time: Optional[datetime] = Field(default=None, description="Sync completion timestamp")
-    books_processed: int = Field(default=0, description="Total books examined")
+    books_processed: int = Field(default=0, description="Total books synced (created + updated)")
     books_created: int = Field(default=0, description="New books added to Notion")
     books_updated: int = Field(default=0, description="Existing books updated")
+    books_skipped: int = Field(default=0, description="Books skipped (no changes detected)")
+    updated_book_names: List[str] = Field(default_factory=list, description="Names of books that were created or updated")
     highlights_synced: int = Field(default=0, description="New highlights added")
-    highlights_skipped: int = Field(default=0, description="Duplicates skipped (from cache)")
-    cache_hits: int = Field(default=0, description="Highlights found in cache (deduplication)")
-    cache_misses: int = Field(default=0, description="Highlights not in cache (new)")
     errors: List[str] = Field(default_factory=list, description="Error messages if any")
 
     @property
@@ -68,19 +67,6 @@ class SyncSession(BaseModel):
             return 0.0
         return (self.end_time - self.start_time).total_seconds()
 
-    @property
-    def deduplication_rate(self) -> float:
-        """
-        Calculate deduplication rate as percentage.
-
-        Returns percentage of highlights that were cached (duplicates).
-        Returns 0.0 if no highlights were processed.
-        """
-        total = self.cache_hits + self.cache_misses
-        if total == 0:
-            return 0.0
-        return (self.cache_hits / total) * 100.0
-
     def summary_message(self) -> str:
         """
         Generate human-readable summary message.
@@ -88,20 +74,14 @@ class SyncSession(BaseModel):
         Used for notifications and CLI output.
         """
         if self.status == SyncStatus.SUCCESS:
-            dedup_msg = ""
-            if self.cache_hits > 0:
-                dedup_msg = f", {self.cache_hits} duplicates skipped"
             return (
-                f"Synced {self.cache_misses} new highlights (from {self.books_processed} books) "
-                f"in {self.duration_seconds:.1f}s{dedup_msg}"
+                f"Synced {self.highlights_synced} highlights from {self.books_processed} book(s) "
+                f"in {self.duration_seconds:.1f}s"
             )
         elif self.status == SyncStatus.PARTIAL:
-            dedup_msg = ""
-            if self.cache_hits > 0:
-                dedup_msg = f", {self.cache_hits} duplicates skipped"
             return (
                 f"Partial sync: {self.highlights_synced} highlights synced, "
-                f"{len(self.errors)} errors occurred{dedup_msg}"
+                f"{len(self.errors)} errors occurred"
             )
         else:
             error_msg = self.errors[0] if self.errors else "Unknown error"
@@ -113,7 +93,7 @@ class SyncSession(BaseModel):
 
     def complete(self) -> None:
         """Mark sync session as complete with current timestamp."""
-        self.end_time = datetime.now()
+        self.end_time = datetime.now(timezone.utc).astimezone()
 
     def __str__(self) -> str:
         """Human-readable representation."""

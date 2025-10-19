@@ -1,5 +1,6 @@
 """Interactive setup wizard for kobo-notion-sync."""
 
+import logging
 import sys
 import time
 from pathlib import Path
@@ -9,6 +10,7 @@ import click
 import structlog
 
 from kobo_notion_sync import __version__
+from kobo_notion_sync.lib.logger import setup_console_logging
 
 logger = structlog.get_logger(__name__)
 
@@ -19,7 +21,7 @@ def display_welcome_banner() -> None:
 ╔══════════════════════════════════════════════════════════╗
 ║                                                          ║
 ║          Kobo-Notion Sync Tool - Setup Wizard            ║
-║                  Version {__version__:<15}                ║
+║                  Version {__version__:<15}                 ║
 ║                                                          ║
 ║  This wizard will help you configure the sync tool       ║
 ║  to automatically transfer your Kobo highlights to       ║
@@ -32,27 +34,25 @@ def display_welcome_banner() -> None:
 
 
 @click.command()
-@click.option(
-    "--skip-schedule",
-    is_flag=True,
-    default=False,
-    help="Skip launchd schedule installation",
-)
-def setup(
-    skip_schedule: bool,
-) -> None:
+def setup() -> None:
     """Interactive setup wizard to configure the tool for first-time use.
-    
+
     This wizard will guide you through:
     - Connecting your Notion integration
     - Detecting your Kobo device
     - Selecting or creating a Notion database
-    - Configuring scheduled sync (optional)
     
     Requirements:
     - Notion integration token from https://notion.so/my-integrations
     - Kobo e-reader device (for device detection)
     """
+    # Set up console logging for setup command
+    setup_console_logging(log_level="WARNING")
+    
+    # Suppress DEBUG level logs from services during setup for cleaner UI
+    logging.getLogger("kobo_notion_sync.services.notion_client").setLevel(logging.WARNING)
+    logging.getLogger("kobo_notion_sync.services.kobo_extractor").setLevel(logging.WARNING)
+    
     display_welcome_banner()
     
     # Prompt to continue
@@ -257,6 +257,7 @@ def setup(
                     
                     try:
                         client.initialize_empty_database(selected_db["id"])
+                        client.add_database_description(selected_db["id"])
                         click.echo(" ✓")
                         click.secho(
                             f"✓ Database initialized with required properties (Author, Type, ISBN, etc.)",
@@ -390,10 +391,7 @@ def setup(
                 cloud_enabled=False,  # Cloud setup in T035
                 cloud_email=None,
             ),
-            sync=SyncConfig(
-                scheduled_enabled=False,  # Schedule setup in T087
-                scheduled_time="09:00",
-            ),
+            sync=SyncConfig(),
             logging=LoggingConfig(level="INFO"),
         )
         
@@ -430,11 +428,32 @@ def setup(
         click.echo()
         click.echo("Starting initial sync...", nl=False)
         try:
-            # TODO: Import and call actual sync function when available (T050+)
-            # For now, just show a placeholder message
+            from kobo_notion_sync.services.kobo_extractor import KoboExtractor
+            from kobo_notion_sync.services.notion_client import NotionClient
+            from kobo_notion_sync.services.sync_manager import SyncManager
+            
+            # Initialize services
+            kobo_extractor = KoboExtractor()
+            notion_client = NotionClient(token=notion_token)
+            sync_manager = SyncManager(
+                kobo_extractor=kobo_extractor,
+                notion_client=notion_client,
+                config=config,
+            )
+            
+            # Run sync
+            sync_session = sync_manager.sync_full(full_mode=False, dry_run=False)
+            
             click.echo(" ✓")
             click.secho("✓ Initial sync completed", fg="green")
-            logger.info("setup_initial_sync_completed")
+            click.echo(f"  • Books created: {sync_session.books_created}")
+            click.echo(f"  • Books updated: {sync_session.books_updated}")
+            click.echo(f"  • Highlights synced: {sync_session.highlights_synced}")
+            
+            if sync_session.errors:
+                click.secho(f"  ⚠️  {len(sync_session.errors)} error(s) occurred", fg="yellow")
+            
+            logger.info("setup_initial_sync_completed", highlights=sync_session.highlights_synced)
         except Exception as e:
             click.echo(" ✗")
             click.secho(f"⚠️  Initial sync encountered issues: {str(e)}", fg="yellow")
@@ -479,16 +498,25 @@ def setup(
     click.echo("Next Steps:")
     click.echo("─" * 60)
     click.echo("  1. Your configuration is now saved and ready to use")
-    click.echo("  2. Run 'kobo-notion sync' to start syncing your highlights")
-    click.echo("  3. Use 'kobo-notion schedule' to set up automatic sync")
+    click.echo("  2. Connect your Kobo device via USB")
+    click.echo("  3. Run 'kobo-notion sync' to start syncing your highlights")
     click.echo("  4. Check logs at: ~/.kobo-notion-sync/logs/")
-    
+
     click.echo()
     click.secho("✓ Ready to sync! Happy reading! 📚", fg="green", bold=True)
-    
+    click.echo()
+    click.secho(
+        "💡 Like this tool? Give it a star on GitHub!",
+        fg="cyan"
+    )
+    click.secho(
+        "   github.com/stellaquizas/kobo-notion-sync",
+        fg="blue",
+        underline=True
+    )
+
     logger.info(
         "setup_wizard_completed",
-        skip_schedule=skip_schedule,
         database_id=selected_database_id,
         config_file=str(config_file_path),
     )

@@ -5,6 +5,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from kobo_notion_sync.lib.time_formatter import format_time_spent
+
 
 class Book(BaseModel):
     """
@@ -28,6 +30,12 @@ class Book(BaseModel):
     )
     date_last_read: Optional[datetime] = Field(
         default=None, description="Last time book was opened"
+    )
+    date_started: Optional[datetime] = Field(
+        default=None, description="Date when book was first opened (for reading duration)"
+    )
+    date_finished: Optional[datetime] = Field(
+        default=None, description="Date when book was marked as finished (read_status=2)"
     )
     content_type: int = Field(description="ContentType (must be 6 for EPUB ebooks)")
     cover_image_url: Optional[str] = Field(
@@ -62,21 +70,31 @@ class Book(BaseModel):
     @property
     def progress_code(self) -> str:
         """
-        Derive Notion "Progress Code" status from Kobo read state.
+        Derive Notion "Status" from Kobo read state.
 
         Status Determination:
         - "New": percent_read == 0% (purchased but not opened)
         - "Reading": 0% < percent_read < 100% AND read_status != 2
-        - "Completed": read_status == 2 (finished)
+        - "Finished": read_status == 2 (authoritative indicator, regardless of progress %)
 
         This is the authoritative mapping per data-model.md "Book Status Lifecycle".
+        Note: read_status=2 is the source of truth for finished books (Kobo's official status).
         """
         if self.percent_read == 0.0:
             return "New"
         elif self.read_status == 2:
-            return "Completed"
+            return "Finished"
         else:
             return "Reading"
+
+    @property
+    def time_spent_formatted(self) -> Optional[str]:
+        """
+        Get formatted time spent reading.
+
+        Returns human-readable format like "2hr 30min", "45min", or None.
+        """
+        return format_time_spent(self.time_spent_reading)
 
     @property
     def is_synced(self) -> bool:
