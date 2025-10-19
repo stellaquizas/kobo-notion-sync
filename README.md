@@ -6,10 +6,12 @@ Automatically sync your Kobo e-reader highlights and annotations to Notion.
 
 - 📖 Extract highlights from Kobo e-reader via USB
 - 📝 Sync highlights to Notion database
+- 🧠 **Smart Sync** - Intelligently detects reading activity and only updates books you've re-read
 - 🔄 Deduplication to prevent duplicates
+- 📊 Reading period tracking - Automatically records when you read each book and for how long
 - 🎨 Automatic book cover retrieval
-- 🔔 Optional sync reminders (macOS)
 - 🔒 Secure credential storage in macOS Keychain
+- 💬 Desktop notifications for sync status
 
 ## Requirements
 
@@ -63,7 +65,7 @@ Follow the prompts to:
 - Select or create a Notion database
 - Configure optional features
 
-### 3. Sync Highlights
+### 3. Sync Highlights and Metadata
 
 ```bash
 # Connect your Kobo via USB, then run:
@@ -78,10 +80,10 @@ poetry run kobo-notion sync
 # Interactive setup wizard
 poetry run kobo-notion setup
 
-# Sync highlights (manual)
+# Sync highlights and metadata (default smart sync)
 poetry run kobo-notion sync
 
-# Force full sync (bypass cache)
+# Re-sync all highlights and metadata (ignore smart sync logic)
 poetry run kobo-notion sync --full
 
 # Preview changes without syncing
@@ -92,6 +94,48 @@ poetry run kobo-notion sync --no-notification
 
 # Show version
 poetry run kobo-notion --version
+```
+
+## Smart Sync Feature
+
+The Smart Sync system intelligently tracks reading activity to optimize sync performance and keep your Notion database up-to-date:
+
+### How It Works
+
+- **New Books**: Automatically creates Notion entries for books not yet in your database
+- **Unchanged Books**: Skips books you haven't read since the last sync (based on last read date comparison)
+- **Re-read Books**: When you open a book and continue reading, the tool detects this and updates all fields and highlights
+
+### Reading Period Tracking
+
+The system tracks your complete reading timeline for each book:
+
+- **First Read Date** - The day you first opened the book on your Kobo (LastTimeStartedReading)
+- **Last Read Date** - The most recent day you opened the book (DateLastRead)
+- **Reading Period** - Calculated duration between first and last read dates
+
+**For new books**, highlights display:
+`Started: YYYY-MM-DD to Last: YYYY-MM-DD (X days)`
+
+**When you re-read a book**, highlights are updated with the new reading session dates:
+`YYYY-MM-DD to YYYY-MM-DD (X days)` (previous session to current session)
+
+This gives you a complete history of your reading timeline and how long you spent on each book.
+
+### Sync Status Notifications
+
+After each sync, you'll see a summary showing:
+
+- Number of new books added
+- Number of books re-read and updated
+- Number of unchanged books skipped
+
+### Manual Full Sync
+
+If you need to re-sync all highlights and metadata regardless of reading activity:
+
+```bash
+poetry run kobo-notion sync --full
 ```
 
 ## Configuration
@@ -130,6 +174,48 @@ Your Notion database will be initialized with these properties:
 **Cover Images:** Book covers are set as page covers (not a database property). To display covers in Gallery view, configure your view settings to use "Page cover" as the card preview source.
 
 The setup wizard automatically creates these properties for empty databases.
+
+## Manual Notion Configuration
+
+After the initial sync, configure your Notion database for optimal viewing. These settings are **not available via the Notion API** and must be set manually in Notion:
+
+### 1. Switch to Gallery View
+
+- Open your Notion database
+- Click the `+ Add a view` button
+- Select **Gallery**
+- This gives you a beautiful card-based view of your books
+
+### 2. Order Columns (in Table View)
+
+- In your table view, drag and drop column headers to reorder them
+- Suggested order: **Name → Author → Status → Progress → Type → ISBN → Publisher**
+- Pin frequently-used columns by right-clicking the header
+
+### 3. Set Page Cover to Card Preview
+
+In Gallery view:
+- Click the **Settings** (gear icon) at the top
+- Go to **Card preview** section
+- Select **Page cover** to display book covers on cards
+- Optional: Choose which properties appear on the card (e.g., Author, Status, Progress)
+
+### 4. Adjust Property Visibility
+
+- In your table view, right-click any column header
+- Select **Hide** to hide properties you don't need (e.g., Kobo Content ID)
+- Unhide important properties like Description and Reading Period
+- Properties like **Time Spent** and **Description** are optional and can be toggled based on your needs
+
+### Why These Are Manual
+
+The Notion API does not yet support:
+- ❌ Creating or switching view types (Gallery, Table, Calendar, etc.)
+- ❌ Reordering database columns
+- ❌ Setting card preview sources
+- ❌ Managing property visibility per view
+
+These features must be configured directly in the Notion interface for now.
 
 ## Troubleshooting
 
