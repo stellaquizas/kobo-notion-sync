@@ -26,7 +26,7 @@ Automatically sync your Kobo e-reader highlights and annotations to Notion.
 
 ```bash
 # Install directly from GitHub using uv
-uv tool install --from git+https://github.com/stellaquizas/kobo-notion-sync.git kobo-notion
+uv tool install git+https://github.com/stellaquizas/kobo-notion-sync.git
 
 # Verify installation
 kobo-notion --version

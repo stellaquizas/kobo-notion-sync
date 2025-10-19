@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "kobo-notion-sync"
+name = "kobo-notion"
 version = "1.0.0"
 description = "Sync Kobo e-reader highlights and metadata to Notion"
 authors = ["Stella Cheng <stella@example.com>"]
