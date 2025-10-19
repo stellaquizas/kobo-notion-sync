@@ -17,10 +17,10 @@ class CoverImageService:
     Service for retrieving book cover image URLs from external APIs.
     
     Implements:
-    - Open Library API cover lookup (T091, T092)
-    - Google Books API cover lookup as fallback (T091, T092)
-    - Cover image URL validation (T093)
-    - Retry logic for transient failures (T093)
+    - Open Library API cover lookup
+    - Google Books API cover lookup as fallback
+    - Cover image URL validation
+    - Retry logic for transient failures 
     
     Note: Returns URLs only - no downloads or file uploads needed.
     External URLs work directly in Notion's Image property.
@@ -45,7 +45,7 @@ class CoverImageService:
         title: Optional[str] = None,
         author: Optional[str] = None,
     ) -> Optional[str]:
-        """Get cover image URL for a book (T092, FR-017A).
+        """Get cover image URL for a book.
         
         Attempts to retrieve cover URL in this order:
         1. Open Library by ISBN (if ISBN provided)
@@ -138,7 +138,7 @@ class CoverImageService:
             return None
     
     def _try_google_books_by_isbn(self, isbn: str) -> Optional[str]:
-        """Try to get cover URL from Google Books using ISBN (T092).
+        """Try to get cover URL from Google Books using ISBN.
         
         Args:
             isbn: Book ISBN
@@ -205,7 +205,7 @@ class CoverImageService:
         title: str,
         author: str,
     ) -> Optional[str]:
-        """Try to get cover URL from Google Books using title and author (T092).
+        """Try to get cover URL from Google Books using title and author.
         
         Args:
             title: Book title
@@ -280,7 +280,7 @@ class CoverImageService:
             return None
     
     def _validate_url(self, url: str) -> bool:
-        """Validate that URL is accessible and returns an image (T093, FR-017A).
+        """Validate that URL is accessible and returns an image.
         
         Uses HTTP HEAD request to verify:
         - URL returns 200 status

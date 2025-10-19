@@ -22,7 +22,17 @@ Automatically sync your Kobo e-reader highlights and annotations to Notion.
 
 ## Installation
 
-### Using Poetry (Development)
+### For Users
+
+```bash
+# Install directly from GitHub using uv
+uv tool install --from git+https://github.com/stellaquizas/kobo-notion-sync.git kobo-notion
+
+# Verify installation
+kobo-notion --version
+```
+
+### For Developers
 
 ```bash
 # Clone the repository
@@ -34,12 +44,6 @@ poetry install
 
 # Verify installation
 poetry run kobo-notion --version
-```
-
-### Using pip (User Installation)
-
-```bash
-pip install kobo-notion-sync
 ```
 
 ## Quick Start
@@ -55,7 +59,7 @@ pip install kobo-notion-sync
 ### 2. Run Setup Wizard
 
 ```bash
-poetry run kobo-notion setup
+kobo-notion setup
 ```
 
 Follow the prompts to:
@@ -69,7 +73,7 @@ Follow the prompts to:
 
 ```bash
 # Connect your Kobo via USB, then run:
-poetry run kobo-notion sync
+kobo-notion sync
 ```
 
 ## Usage
@@ -78,22 +82,22 @@ poetry run kobo-notion sync
 
 ```bash
 # Interactive setup wizard
-poetry run kobo-notion setup
+kobo-notion setup
 
 # Sync highlights and metadata (default smart sync)
-poetry run kobo-notion sync
+kobo-notion sync
 
 # Re-sync all highlights and metadata (ignore smart sync logic)
-poetry run kobo-notion sync --full
+kobo-notion sync --full
 
 # Preview changes without syncing
-poetry run kobo-notion sync --dry-run
+kobo-notion sync --dry-run
 
 # Disable notifications
-poetry run kobo-notion sync --no-notification
+kobo-notion sync --no-notification
 
 # Show version
-poetry run kobo-notion --version
+kobo-notion --version
 ```
 
 ## Smart Sync Feature
@@ -135,7 +139,7 @@ After each sync, you'll see a summary showing:
 If you need to re-sync all highlights and metadata regardless of reading activity:
 
 ```bash
-poetry run kobo-notion sync --full
+kobo-notion sync --full
 ```
 
 ## Configuration
@@ -195,6 +199,7 @@ After the initial sync, configure your Notion database for optimal viewing. Thes
 ### 3. Set Page Cover to Card Preview
 
 In Gallery view:
+
 - Click the **Settings** (gear icon) at the top
 - Go to **Card preview** section
 - Select **Page cover** to display book covers on cards
@@ -210,6 +215,7 @@ In Gallery view:
 ### Why These Are Manual
 
 The Notion API does not yet support:
+
 - ❌ Creating or switching view types (Gallery, Table, Calendar, etc.)
 - ❌ Reordering database columns
 - ❌ Setting card preview sources
@@ -230,9 +236,9 @@ ls /Volumes/ | grep -i kobo
 
 ### Notion token invalid
 
-Run `poetry run kobo-notion setup` again to re-enter your token.
+Run `kobo-notion setup` again to re-enter your token.
 
-Verify you're using an **Internal Integration Token** (starts with `secret_`), not an API key.
+Verify you're using an **Internal Integration Token**, not an API key.
 
 ### Check logs
 
@@ -251,3 +257,5 @@ MIT License - see [LICENSE](LICENSE) for details.
 - Built with [Click](https://click.palletsprojects.com/)
 - Uses [Notion SDK](https://github.com/ramnes/notion-sdk-py)
 - Inspired by the Kobo reading community
+
+📚 Happy reading!

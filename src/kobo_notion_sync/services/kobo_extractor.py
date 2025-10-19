@@ -35,7 +35,6 @@ class KoboExtractor:
     # Known Kobo device models (all officially supported models)
     # Source: https://help.kobo.com/hc/en-us/articles/360019127133-Supported-eReader-models
     KNOWN_DEVICE_MODELS = [
-        # Current/Recent models (2023-2024)
         "Kobo Libra Colour",
         "Kobo Clara Colour",
         "Kobo Clara BW",
@@ -43,19 +42,16 @@ class KoboExtractor:
         "Kobo Clara 2E",
         "Kobo Sage",
         "Kobo Libra 2",
-        # Slightly older models (2021-2022)
         "Kobo Elipsa",
         "Kobo Nia",
         "Kobo Libra H2O",
         "Kobo Forma",
-        # Older models (2019-2020)
         "Kobo Clara HD",
         "Kobo Aura H2O Edition 2",
         "Kobo Aura ONE",
         "Kobo Aura Edition 2",
         "Kobo Touch 2.0",
         "Kobo Glo HD",
-        # Legacy models (2015-2018)
         "Kobo Aura H2O",
         "Kobo Aura",
         "Kobo Aura HD",
@@ -316,7 +312,6 @@ class KoboExtractor:
         """
         # Official Kobo device code mappings from support page
         device_map = {
-            # Current/Recent models (2023-2024)
             "N428": "Kobo Libra Colour",
             "N367": "Kobo Clara Colour",
             "N365": "Kobo Clara BW",
@@ -324,22 +319,16 @@ class KoboExtractor:
             "N506": "Kobo Clara 2E",
             "N778": "Kobo Sage",
             "N418": "Kobo Libra 2",
-            
-            # Slightly older models (2021-2022)
             "N604": "Kobo Elipsa",
             "N306": "Kobo Nia",
             "N873": "Kobo Libra H2O",
             "N782": "Kobo Forma",
-            
-            # Older models (2019-2020)
             "N249": "Kobo Clara HD",
             "N867": "Kobo Aura H2O Edition 2",
             "N709": "Kobo Aura ONE",
             "N236": "Kobo Aura Edition 2",
             "N587": "Kobo Touch 2.0",
             "N437": "Kobo Glo HD",
-            
-            # Legacy models (2015-2018)
             "N250": "Kobo Aura H2O",
             "N514": "Kobo Aura",
             "N204": "Kobo Aura HD",
@@ -445,7 +434,7 @@ class KoboExtractor:
             
             for row in rows:
                 try:
-                    # Extract kobo_content_id (trim to filename only per FR-016)
+                    # Extract kobo_content_id (trim to filename only)
                     kobo_id = row["kobo_content_id"]
                     if kobo_id and kobo_id.startswith("file:///"):
                         kobo_id = os.path.basename(kobo_id)
@@ -546,7 +535,7 @@ class KoboExtractor:
         Queries Bookmark table WHERE Type='highlight' AND Hidden=0.
         Joins with content table to verify book exists and ContentType=6.
         
-        Returns highlights ordered chronologically by DateCreated (per FR-018).
+        Returns highlights ordered chronologically by DateCreated.
         
         Args:
             book_id: Kobo content ID to extract highlights for
@@ -578,7 +567,7 @@ class KoboExtractor:
             cursor = conn.cursor()
             
             # Query highlights for book
-            # Type='highlight' AND Hidden=0 per FR-018, FR-023
+            # Type='highlight' AND Hidden=0
             # NOTE: Bookmark.ContentID contains the full path (e.g., "uuid!item!xhtml/file.xhtml")
             # but Bookmark.VolumeID contains just the book UUID, which matches content.ContentID
             # NOTE: Hidden field is TEXT type with value 'false' (not boolean/integer)

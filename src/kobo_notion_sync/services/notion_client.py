@@ -11,9 +11,8 @@ from notion_client.errors import APIResponseError
 
 logger = structlog.get_logger(__name__)
 
-
 def retry_with_backoff(max_retries: int = 3, initial_wait: float = 1.0) -> Callable:
-    """Decorator for exponential backoff retry on rate limit errors (T062, FR-045).
+    """Decorator for exponential backoff retry on rate limit errors.
     
     Implements exponential backoff for Notion API rate limiting:
     - 1st retry: wait 1s
@@ -972,7 +971,7 @@ class NotionClient:
         finished_date: Optional[datetime] = None,
         last_read_date: Optional[datetime] = None,
     ) -> str:
-        """Create a new book page in Notion database (T055, FR-028).
+        """Create a new book page in Notion database.
         
         Args:
             database_id: Notion database ID
@@ -1105,7 +1104,7 @@ class NotionClient:
         page_id: str,
         image_url: str,
     ) -> None:
-        """Set book cover image as page cover (T094, FR-017A).
+        """Set book cover image as page cover.
         
         Sets the page cover of a Notion page to an external URL.
         The image will display:
@@ -1141,7 +1140,7 @@ class NotionClient:
             )
         
         except APIResponseError as e:
-            # Log error but don't raise - cover images are non-blocking (SC-028)
+            # Log error but don't raise - cover images are non-blocking
             logger.error(
                 "set_cover_image_failed",
                 page_id=page_id,
@@ -1149,7 +1148,7 @@ class NotionClient:
                 error=str(e),
                 error_code=e.code if hasattr(e, 'code') else "unknown",
             )
-            # Note: Per T096, cover image failures should not block sync
+            # Note: cover image failures should not block sync
             raise NotionValidationError(
                 f"Failed to set cover image: {str(e)}",
                 details={"error_code": e.code if hasattr(e, 'code') else "unknown"},
@@ -1162,7 +1161,7 @@ class NotionClient:
                 image_url=image_url,
                 error=str(e),
             )
-            # Note: Per T096, cover image failures should not block sync
+            # Note: cover image failures should not block sync
             raise NotionValidationError(
                 f"Unexpected error setting cover image: {str(e)}"
             )
@@ -1175,7 +1174,7 @@ class NotionClient:
         start_read_date: Optional[datetime] = None,
         last_read_date: Optional[datetime] = None,
     ) -> int:
-        """Create highlight blocks in a Notion page (T057-T057F, FR-028B).
+        """Create highlight blocks in a Notion page.
         
         Generates structured page content with:
         - Heading 2: "📖 Highlights (count)" section header
@@ -1493,7 +1492,7 @@ class NotionClient:
         page_id: str,
         completion_date: Optional[datetime] = None,
     ) -> None:
-        """Update book page when status changes from Reading to Finished (T061, FR-024).
+        """Update book page when status changes from Reading to Finished.
         
         Sets Finished Date property to mark book as finished.
         
@@ -1547,7 +1546,7 @@ class NotionClient:
         self,
         database_id: str,
     ) -> List[Dict[str, Any]]:
-        """Query Notion database for books with Kobo tracking properties (T075, FR-025).
+        """Query Notion database for books with Kobo tracking properties.
         
         Filters for pages that have:
         - Kobo Content ID property populated (not empty)
@@ -1744,7 +1743,7 @@ class NotionClient:
         database_id: str,
         kobo_content_id: str,
     ) -> Optional[Dict[str, Any]]:
-        """Get existing book page by Kobo Content ID with Type filter (T076, T076A, FR-025).
+        """Get existing book page by Kobo Content ID with Type filter.
         
         Queries for a page with matching Kobo Content ID AND Type = "Kobo" (if available).
         Returns None if not found (may be manual entry or doesn't exist).
@@ -1876,7 +1875,7 @@ class NotionClient:
         time_spent: Optional[int] = None,
         last_read_date: Optional[datetime] = None,
     ) -> None:
-        """Update existing book page properties with pre-modification check (T056, T077, FR-027).
+        """Update existing book page properties with pre-modification check.
         
         IMPORTANT: This method should only be called after verifying the page
         has a Kobo Content ID (via get_book_by_kobo_id). This ensures manual
@@ -2038,7 +2037,7 @@ class NotionClient:
         self,
         database_id: str,
     ) -> int:
-        """Count manual entries in database (pages without Kobo tracking) (T078, FR-025).
+        """Count manual entries in database (pages without Kobo tracking).
         
         Counts pages that either:
         - Have empty Kobo Content ID property

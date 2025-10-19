@@ -45,7 +45,7 @@ def sync(full: bool, dry_run: bool, no_notification: bool) -> None:
         # Get config directory
         config_dir = Path.home() / ".kobo-notion-sync"
         
-        # Step 1: Pre-flight lock check (FR-038A)
+        # Step 1: Pre-flight lock check
         logger.info("sync_command_started", full=full, dry_run=dry_run)
         try:
             lock_manager = LockManager(config_dir)
@@ -94,7 +94,7 @@ def sync(full: bool, dry_run: bool, no_notification: bool) -> None:
                 logger.error("notion_token_retrieval_failed", error=str(e))
                 sys.exit(2)
             
-            # Step 3.5: Confirm full sync deletion if requested (FR-038B, UX)
+            # Step 3.5: Confirm full sync deletion if requested
             if full and not dry_run:
                 click.echo()
                 click.secho("⚠️  WARNING: Full Sync Mode", fg="yellow", bold=True)
@@ -111,7 +111,7 @@ def sync(full: bool, dry_run: bool, no_notification: bool) -> None:
                     logger.info("sync_cancelled_by_user_full_mode_confirmation")
                     sys.exit(0)
             
-            # Step 4: Initialize services and run sync (T043-T070)
+            # Step 4: Initialize services and run sync
             try:
                 kobo_extractor = KoboExtractor()
                 notion_client = NotionClient(token=notion_token)
@@ -160,7 +160,7 @@ def sync(full: bool, dry_run: bool, no_notification: bool) -> None:
                     click.echo(f"\nStatus: ✓ Completed in {sync_session.duration_seconds:.1f}s")
                     exit_code = 0
                 
-                # Step 5: Send desktop notification (T067, FR-042, FR-016)
+                # Step 5: Send desktop notification
                 if not no_notification:
                     try:
                         notif_service = NotificationService()

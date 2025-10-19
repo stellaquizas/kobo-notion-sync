@@ -42,15 +42,15 @@ class SyncManager:
     Orchestrates sync operations coordinating kobo_extractor and notion_client.
 
     Implements:
-    - Kobo device connection verification (T045, FR-021)
-    - Book metadata extraction from Kobo (T046-T047B, FR-016-FR-022)
-    - Highlight extraction from Kobo (T049-T050, FR-018, FR-023)
+    - Kobo device connection verification
+    - Book metadata extraction from Kobo
+    - Highlight extraction from Kobo
     - Last read date based updates (smart sync based on reading activity)
-    - Notion book creation/update (T055-T056, FR-027-FR-028)
-    - Highlight page generation with reading period info (T057-T057F, FR-028B)
-    - Kobo-as-source-of-truth logic (T060, FR-028A)
-    - Status transitions (T061, FR-024)
-    - Structured logging (T066, FR-050-FR-051)
+    - Notion book creation/update
+    - Highlight page generation with reading period info
+    - Kobo-as-source-of-truth logic 
+    - Status transitions
+    - Structured logging
     """
 
     def __init__(
@@ -81,16 +81,16 @@ class SyncManager:
         """Execute full manual sync from Kobo to Notion.
 
         Performs:
-        1. Device verification (FR-021)
-        2. Book extraction (FR-016, FR-017, FR-022)
-        3. Highlight extraction (FR-018, FR-023)
-        4. Notion book creation/update (FR-027-FR-028)
-        5. Highlight page generation/update (FR-028B)
+        1. Device verification
+        2. Book extraction
+        3. Highlight extraction
+        4. Notion book creation/update
+        5. Highlight page generation/update
         6. Sync metadata update
 
         Args:
             full_mode: If True, force re-sync all books (ignored, not used)
-            dry_run: If True, preview changes without syncing (T043)
+            dry_run: If True, preview changes without syncin
 
         Returns:
             SyncSession with operation results and statistics
@@ -106,7 +106,7 @@ class SyncManager:
         logger.info("sync_full_started", full_mode=full_mode, dry_run=dry_run)
 
         try:
-            # Step 1: Verify Kobo device connection (T045, FR-021)
+            # Step 1: Verify Kobo device connection
             logger.info("sync_step_device_verification")
             try:
                 device_mount = self.kobo_extractor.detect_device()
@@ -140,7 +140,7 @@ class SyncManager:
                     session.complete()
                     return session
 
-            # Step 2: Extract books from Kobo (T046-T047B, FR-016-FR-022)
+            # Step 2: Extract books from Kobo
             logger.info("sync_step_extracting_books")
             try:
                 config_dict = {
@@ -275,7 +275,7 @@ class SyncManager:
                     logger.debug("book_skipped_no_changes", kobo_id=_short_uuid(book.kobo_content_id), title=book.title)
                     continue
                 
-                # Check device connection before processing each book (T063, FR-044)
+                # Check device connection before processing each book
                 if not self._check_device_connected():
                     logger.error("sync_device_disconnected_during_processing")
                     session.add_error("Kobo device disconnected during sync - halting")
@@ -290,7 +290,7 @@ class SyncManager:
                         progress=book.progress_code,
                     )
 
-                    # Extract highlights for this book (T049-T050, FR-018, FR-023)
+                    # Extract highlights for this book
                     try:
                         highlights = self.kobo_extractor.extract_highlights(
                             book.kobo_content_id
@@ -385,7 +385,7 @@ class SyncManager:
             return session
 
     def _check_device_connected(self) -> bool:
-        """Check if Kobo device is still connected (T063, FR-044).
+        """Check if Kobo device is still connected.
 
         Returns:
             True if device is connected and accessible, False otherwise
@@ -411,7 +411,7 @@ class SyncManager:
         book: Book,
         highlights: List[Any],
     ) -> Optional[str]:
-        """Sync a book and its highlights to Notion (T096, T097, FR-017A, SC-028).
+        """Sync a book and its highlights to Notion.
         
         Creates or updates the book page in Notion, sets cover image if available,
         and updates page content with highlights.
@@ -459,7 +459,7 @@ class SyncManager:
                     last_read_date=book.date_last_read,
                 )
                 
-                # Update status to Completed if applicable (T061, FR-024)
+                # Update status to Completed if applicable
                 if book.progress_code == "Finished":
                     self.notion_client.update_book_status_to_completed(
                         page_id=page_id,
@@ -467,7 +467,7 @@ class SyncManager:
                     )
             
             else:
-                # Create new book page (T055, FR-028)
+                # Create new book page
                 logger.info(
                     "creating_new_book",
                     kobo_id=book_id_short,
@@ -498,7 +498,7 @@ class SyncManager:
                 # New books don't have a previous reading period
                 notion_last_read = None
             
-            # Try to set cover image (T096, T097, FR-017A, SC-028)
+            # Try to set cover image
             # This is non-blocking - if it fails, we continue with the sync
             if page_id and book.isbn:
                 try:
@@ -536,7 +536,7 @@ class SyncManager:
                         )
                 
                 except Exception as e:
-                    # Cover image failures should not block sync (SC-028)
+                    # Cover image failures should not block sync
                     logger.warning(
                         "cover_image_failed_continuing",
                         kobo_id=book_id_short,
@@ -544,7 +544,7 @@ class SyncManager:
                         error=str(e),
                     )
             
-            # Update page content with highlights (T057-T057F, FR-028B)
+            # Update page content with highlights
             if page_id and highlights:
                 # Check if this is an update to existing book (book was re-read)
                 is_book_update = existing_page is not None
@@ -593,7 +593,7 @@ class SyncManager:
                     sync_time=datetime.now(timezone.utc).astimezone(),
                 )
             
-            # Log cover image result (T097, FR-051)
+            # Log cover image result
             logger.info(
                 "book_sync_complete",
                 kobo_id=book_id_short,
